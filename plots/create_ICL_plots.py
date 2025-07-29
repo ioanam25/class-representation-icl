@@ -44,7 +44,7 @@ def load_capacity_df(dataset_name, model_name):
             print(colored(f"Loaded aggregated data from {aggregated_filename}", "green"))
         return capacity_df
     else:
-        root_path = "/mnt/home/akirsanov/ceph/LLM_Geometry/DATA/ICL/results/"
+        root_path = "LLM_Geometry/DATA/ICL/results/"
         paths = list(Path(root_path).glob(f"{dataset_name}/{model_name}/*/*/*:*_examples/run_*/capacity_*.pickle"))
         print(colored(f"Found {len(paths)} capacity files", "green"))
         
@@ -174,7 +174,7 @@ def main_ICL_single(MODEL_NAME, DATASET_NAME):
     performance_df = master_df.query(f'layer == 0 and capacity_task == "{master_df.capacity_task.iloc[0]}" and token_type == "{master_df.token_type.iloc[0]}"') # Selecting only a subset of capacity data for performance analysis
 
     # --- Plotting performance ---
-    save_dir = Path("/mnt/home/akirsanov/LLMGeometry/naacl_2025/plots/ICL_performance/")
+    save_dir = Path("plots/ICL_performance/")
     (save_dir / 'svg').mkdir(exist_ok=True, parents=True)
 
     if DATASET_NAME == 'claude_multitask':

@@ -85,7 +85,7 @@ def create_template(prefix_type, n_examples, keyword, answer_field, dataset_name
 
 
 
-def main(MODEL_NAME, DATASET_NAME, prefix_type, n_examples, keyword, answer_field, N_RUNS=50, root_folder="/mnt/home/akirsanov/ceph/LLM_Geometry/DATA/ICL_stability/results"):
+def main(MODEL_NAME, DATASET_NAME, prefix_type, n_examples, keyword, answer_field, N_RUNS=50, root_folder="DATA/ICL_stability/results"):
     
     root_folder = Path(root_folder)
 

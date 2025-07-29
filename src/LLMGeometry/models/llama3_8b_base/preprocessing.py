@@ -38,10 +38,11 @@ def prepare_batch(batch, model, tokenizer, soft_prompt_embeds=None, soft_prompt_
             - prompt_text_field (str) – a name of the batch dictionary field that contains a string to be used as the prompt.
             - answer_field (str) – a name of the batch dictionary field that specifies desired response of the model. If None, corresponding correct label is set to -100.
     '''
-
+    # print("batch text: ", [b[prompt_text_field] for b in batch])
     prompt_tokens = [tokenizer.encode(b[prompt_text_field], add_special_tokens=False, return_tensors='pt') for b in batch]
     if answer_field is not None:
-        answer_tokens = [tokenizer.encode(b[answer_field], add_special_tokens=False, return_tensors='pt')[:,[0]] for b in batch] # only the first token is used as the answer
+        # answer_tokens = [tokenizer.encode(b[answer_field], add_special_tokens=False, return_tensors='pt')[:,[0]] for b in batch] # only the first token is used as the answer
+        answer_tokens = [b[answer_field] for b in batch]
     else:
         answer_tokens = [-100]*len(batch)
         if verbose:

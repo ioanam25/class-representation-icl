@@ -60,6 +60,8 @@ def get_token_probability(logits_or_probs, token_string_or_id, attention_mask, t
             token_id = tokenizer.encode(t, add_special_tokens=False)
             if len(token_id)>1:
                 warnings.warn(f"Token {t} was split into multiple tokens")
+                print(tokenizer.convert_ids_to_tokens(token_id))
+                print(t, token_id, tokenizer.decode(token_id))
             token_id=token_id[0]
         else:
             token_id = t
@@ -82,7 +84,7 @@ def get_token_probability(logits_or_probs, token_string_or_id, attention_mask, t
 
 
 
-def get_predictions_from_logits(logits, attention_mask=None, N=5, return_strings=False, tokenizer=None, target_token_offset=None):
+def get_predictions_from_logits(logits, attention_mask=None, N=3, return_strings=False, tokenizer=None, target_token_offset=None, constrained_token_ids=None):
     '''
         Returns the top N predictions from the logits.
 
@@ -90,6 +92,8 @@ def get_predictions_from_logits(logits, attention_mask=None, N=5, return_strings
         ----------
         logits: torch.Tensor
             The logits to compute the predictions from.
+        constrained_token_ids: list or torch.Tensor, optional
+            If provided, only compute softmax over these token IDs (constrained classification)
     '''
     if logits.requires_grad:
         logits=logits.detach().float()
@@ -109,12 +113,30 @@ def get_predictions_from_logits(logits, attention_mask=None, N=5, return_strings
     if attention_mask is None:
         attention_mask = torch.ones((batch_size,sequence_len)).to(logits.device)
         
-            
-    probs = torch.softmax(logits, dim=2)
-    selected_ids = torch.argsort(probs, dim=2,descending=True)[:,:,:N].cpu().numpy()
-    batch_indices = torch.arange(batch_size).unsqueeze(1).unsqueeze(2).expand(-1, sequence_len, N)
-    seq_indices = torch.arange(sequence_len).unsqueeze(0).unsqueeze(2).expand(batch_size, -1, N)
-    selected_probs = probs[batch_indices, seq_indices, selected_ids].float()
+    if constrained_token_ids is not None:
+        # Constrained classification: only compute softmax over specified tokens
+        if isinstance(constrained_token_ids, list):
+            constrained_token_ids = torch.tensor(constrained_token_ids)
+        
+        # Extract logits for constrained tokens only
+        constrained_logits = logits[:, :, constrained_token_ids]  # (batch, seq, constrained_vocab)
+        probs = torch.softmax(constrained_logits, dim=2)
+        
+        # Get top N from constrained set
+        selected_probs_indices = torch.argsort(probs, dim=2, descending=True)[:,:,:N].cpu().numpy()
+        # Map back to original token IDs
+        selected_ids = constrained_token_ids[selected_probs_indices].cpu().numpy()
+        
+        batch_indices = torch.arange(batch_size).unsqueeze(1).unsqueeze(2).expand(-1, sequence_len, N)
+        seq_indices = torch.arange(sequence_len).unsqueeze(0).unsqueeze(2).expand(batch_size, -1, N)
+        selected_probs = probs[batch_indices, seq_indices, selected_probs_indices].float()
+    else:
+        # Original unconstrained classification
+        probs = torch.softmax(logits, dim=2)
+        selected_ids = torch.argsort(probs, dim=2,descending=True)[:,:,:N].cpu().numpy()
+        batch_indices = torch.arange(batch_size).unsqueeze(1).unsqueeze(2).expand(-1, sequence_len, N)
+        seq_indices = torch.arange(sequence_len).unsqueeze(0).unsqueeze(2).expand(batch_size, -1, N)
+        selected_probs = probs[batch_indices, seq_indices, selected_ids].float()
 
     # Applying attention mask
     attention_mask_expanded = attention_mask.unsqueeze(-1).expand(-1, -1, N)
