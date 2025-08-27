@@ -15,6 +15,8 @@ from sklearn.metrics import accuracy_score, f1_score
 from scipy.optimize import linear_sum_assignment
 import numpy as np
 import random
+from relabeling import optimize_tokens, template_new_labels
+from sklearn.model_selection import train_test_split
 
 def save_outputs(output, save_folder, CONFIG):
     save_folder = Path(save_folder)
@@ -85,17 +87,6 @@ def create_template(train_df, prefix_type, n_examples, keyword, answer_field, da
     suffix = f'\n{keyword}:'
     return prefix, suffix, chosen_sentences, chosen_labels
 
-def template_new_labels(tokenizer, sentences, labels, new_labels, keyword):
-    prefix = ''
-    prefix_tokens = []
-    for sentence, label in zip(sentences, labels):
-        prefix += 'Text: ' + sentence + f'\n{keyword}: ' + new_labels[label][0] + '\n'
-        prefix_tokens.extend(tokenizer.encode('Text: ' + sentence + f'\n{keyword}: ', add_special_tokens=False))
-        prefix_tokens.append(new_labels[label][1])  # This is the token ID
-        prefix_tokens.extend(tokenizer.encode('\n', add_special_tokens=False))
-    suffix = f'\n{keyword}: '
-    return prefix, suffix, prefix_tokens
-
 def W_ICL(top_k_tokens, sentences, labels, sentence_probs):
     W = {}
     for class_label in labels.unique(): # C 
@@ -159,307 +150,10 @@ def reassign_labels(all_tokens_str, labels, sentences, sentence_probs, tokenizer
     print("sum of cost: ", cost[row_ind, col_ind].sum())
     return new_labels
 
-# prev lambda_reg = 0.00001
-def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer, max_iterations=100, num_restarts=10, lambda_reg=0, ensemble_assignment=False, ensemble_method='voting', ensemble_temperature=1.0, whole_words_only=False):
-    classes = labels.unique()
-    
-    # Convert to list if it's dict_keys
-    if hasattr(top_k_tokens, 'keys'):
-        top_k_tokens = list(top_k_tokens)
-    
-    # Filter for whole word tokens if requested
-    if whole_words_only:
-        top_k_tokens = [token for token in top_k_tokens if token.startswith('Ġ')]
-        print(f"Using {len(top_k_tokens)} whole word tokens for optimization")
-        
-        if len(top_k_tokens) < len(classes):
-            raise ValueError(f"Not enough whole word tokens ({len(top_k_tokens)}) for number of classes ({len(classes)})")
-    else:
-        print(f"Using {len(top_k_tokens)} tokens for optimization")
-    
-    # Helper function to calculate the objective (sum_support_ex)
-    def calculate_objective(token_assignments):
-        total_log_prob = 0
-        for sentence, label in zip(sentences, labels):
-            # Convert token string to token ID
-            label_token_id = tokenizer.convert_tokens_to_ids(token_assignments[label])
-            logit = sentence_logits[sentence][label_token_id]
-            
-            # Convert to float32 to avoid BFloat16 issues
-            if hasattr(logit, 'float'):
-                logit = logit.float()
-            
-            # Calculate denominator
-            denominator = 0
-            for c in classes:
-                c_token_id = tokenizer.convert_tokens_to_ids(token_assignments[c])
-                c_logit = sentence_logits[sentence][c_token_id]
-                
-                # Convert to float32 to avoid BFloat16 issues
-                if hasattr(c_logit, 'float'):
-                    c_logit = c_logit.float()
-                
-                denominator += torch.exp(c_logit)
-            
-            probs = torch.exp(logit) / denominator
-            log_prob = torch.log(probs)
-            total_log_prob += log_prob.item()  # Use .item() to extract scalar value
-        return total_log_prob
-    
-    # Helper function for single hill climbing run
-    def hill_climb_single_run(initial_assignments):
-        token_assignments = initial_assignments.copy()
-        current_objective = calculate_objective(token_assignments)
-        
-        # Hill climbing optimization
-        improved = True
-        iteration = 0
-        
-        while improved and iteration < max_iterations:
-            improved = False
-            iteration += 1
-            
-            for class_to_change in classes:
-                current_token = token_assignments[class_to_change]
-                
-                # Get all candidate tokens (excluding current token)
-                candidate_tokens = [token for token in top_k_tokens if token != current_token]
-                
-                if not candidate_tokens:
-                    continue
-                
-                # Convert candidate tokens to token IDs
-                candidate_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in candidate_tokens]
-                candidate_token_ids = torch.tensor(candidate_token_ids, dtype=torch.long)
-                
-                # Get token IDs for other classes (unchanged)
-                other_class_token_ids = []
-                for c in classes:
-                    if c != class_to_change:
-                        other_class_token_ids.append(tokenizer.convert_tokens_to_ids(token_assignments[c]))
-                other_class_token_ids = torch.tensor(other_class_token_ids, dtype=torch.long)
-                
-                # Vectorized calculation for all candidates
-                total_log_probs = torch.zeros(len(candidate_tokens))
-                
-                for sentence, label in zip(sentences, labels):
-                    sentence_logits_tensor = sentence_logits[sentence]
-                    
-                    if label == class_to_change:
-                        # This sentence uses the class we're changing
-                        label_logits = sentence_logits_tensor[candidate_token_ids].float()
-                        other_logits = sentence_logits_tensor[other_class_token_ids].float()
-                        
-                        denominators = torch.exp(label_logits) + torch.exp(other_logits).sum()
-                        probs = torch.exp(label_logits) / denominators
-                        total_log_probs += torch.log(probs)
-                        
-                    else:
-                        # This sentence uses a different class (unchanged)
-                        label_token_id = tokenizer.convert_tokens_to_ids(token_assignments[label])
-                        label_logit = sentence_logits_tensor[label_token_id].float()
-                        
-                        candidate_logits = sentence_logits_tensor[candidate_token_ids].float()
-                        other_unchanged_logits = sentence_logits_tensor[other_class_token_ids].float()
-                        
-                        denominators = torch.exp(candidate_logits) + torch.exp(other_unchanged_logits).sum()
-                        probs = torch.exp(label_logit) / denominators
-                        total_log_probs += torch.log(probs)
-                
-
-                other_class_id_sum = sum(tokenizer.convert_tokens_to_ids(token_assignments[c]) 
-                        for c in classes if c != class_to_change)
-
-                # For each candidate, we penalize its token ID plus the sum of other class token IDs
-                token_id_penalties = -lambda_reg * (candidate_token_ids.float() + other_class_id_sum)
-                total_log_probs += token_id_penalties
-
-
-                # Find the best candidate
-                best_idx = torch.argmax(total_log_probs).item()
-                best_objective = total_log_probs[best_idx].item()
-                best_token = candidate_tokens[best_idx]
-                
-                # If improvement found, update
-                if best_objective > current_objective:
-                    token_assignments[class_to_change] = best_token
-                    current_objective = best_objective
-                    improved = True
-                    break  # Move to next class after finding improvement
-        
-        return token_assignments, current_objective, iteration
-    
-    # Run multiple restarts
-    best_overall_assignments = None
-    best_overall_objective = float('-inf')
-    best_restart = -1
-    all_solutions = []  # Store all solutions for ensemble
-    
-    for restart in range(num_restarts):
-        print(f"\n--- Restart {restart + 1}/{num_restarts} ---")
-        
-        # Initialize with random assignment for this restart
-        initial_assignments = {c: random.choice(top_k_tokens) for c in classes}
-        initial_objective = calculate_objective(initial_assignments)
-        print(f"Initial objective: {initial_objective}")
-        
-        # Run hill climbing
-        final_assignments, final_objective, iterations = hill_climb_single_run(initial_assignments)
-        
-        print(f"Final objective after {iterations} iterations: {final_objective}")
-        print(f"Final token assignments: {final_assignments}")
-        
-        # Store solution for ensemble
-        all_solutions.append((final_assignments.copy(), final_objective))
-        
-        # Update best overall solution
-        if final_objective > best_overall_objective:
-            best_overall_assignments = final_assignments
-            best_overall_objective = final_objective
-            best_restart = restart + 1
-            print(f"*** New best solution found in restart {restart + 1}! ***")
-    
-    # Choose final assignments based on ensemble_assignment flag
-    if ensemble_assignment:
-        print(f"\n=== ENSEMBLE ASSIGNMENT ({ensemble_method.upper()}) ===")
-        
-        if ensemble_method == 'voting':
-            # Use majority voting across all restarts
-            ensemble_assignments = {}
-            for class_label in classes:
-                # Count votes for each token for this class
-                token_votes = {}
-                token_scores = {}  # Track best score for each token (for tie-breaking)
-                
-                for assignments, objective in all_solutions:
-                    token = assignments[class_label]
-                    if token not in token_votes:
-                        token_votes[token] = 0
-                        token_scores[token] = objective
-                    token_votes[token] += 1
-                    # Keep track of best objective score for this token (for tie-breaking)
-                    if objective > token_scores[token]:
-                        token_scores[token] = objective
-                
-                # Find most voted token, break ties by highest objective score
-                max_votes = max(token_votes.values())
-                tied_tokens = [token for token, votes in token_votes.items() if votes == max_votes]
-                
-                if len(tied_tokens) == 1:
-                    chosen_token = tied_tokens[0]
-                    print(f"Class {class_label}: '{chosen_token}' (votes: {max_votes}/{num_restarts})")
-                else:
-                    # Break tie by highest objective score
-                    chosen_token = max(tied_tokens, key=lambda t: token_scores[t])
-                    print(f"Class {class_label}: '{chosen_token}' (votes: {max_votes}/{num_restarts}, tie-broken by score: {token_scores[chosen_token]:.4f})")
-                
-                ensemble_assignments[class_label] = chosen_token
-                
-        elif ensemble_method == 'logit_averaging':
-            # True ensemble averaging: create new token assignments from averaged logits
-            print("Computing ensemble assignments via ensemble logit averaging over full vocabulary...")
-            
-            ensemble_assignments = {}
-            
-            for class_label in classes:
-                print(f"\nProcessing class {class_label}:")
-                
-                # Collect tokens assigned to this class across restarts
-                assigned_tokens = [assignments[class_label] for assignments, _ in all_solutions]
-                print(f"  Tokens assigned across restarts: {assigned_tokens}")
-                
-                # For each sentence of this class, compute ensemble-averaged logits over ALL tokens
-                ensemble_logit_sum = torch.zeros(len(top_k_tokens))
-                sentence_count = 0
-                
-                for sentence, label in zip(sentences, labels):
-                    if label == class_label:
-                        # Get the full logit vector for this sentence
-                        sentence_logits_tensor = sentence_logits[sentence].float()
-                        
-                        # Create ensemble logits by averaging across restart choices
-                        restart_logit_sum = torch.zeros_like(sentence_logits_tensor)
-                        for token in assigned_tokens:
-                            token_id = tokenizer.convert_tokens_to_ids(token)
-                            # Add this restart's logit contribution (all zeros except for chosen token)
-                            restart_contribution = torch.zeros_like(sentence_logits_tensor)
-                            restart_contribution[token_id] = sentence_logits_tensor[token_id]
-                            restart_logit_sum += restart_contribution
-                        
-                        # Average across restarts
-                        avg_restart_logits = restart_logit_sum / len(assigned_tokens)
-                        
-                        # Focus only on our candidate tokens (top_k_tokens)
-                        candidate_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in top_k_tokens]
-                        ensemble_logit_sum += avg_restart_logits[candidate_token_ids]
-                        sentence_count += 1
-                
-                # Average across all sentences of this class
-                if sentence_count > 0:
-                    avg_ensemble_logits = ensemble_logit_sum / sentence_count
-                else:
-                    avg_ensemble_logits = torch.zeros(len(top_k_tokens))
-                
-                print(f"  Computed ensemble logits across {sentence_count} sentences")
-                
-                # Apply temperature scaling and softmax over ALL candidate tokens
-                scaled_logits = avg_ensemble_logits / ensemble_temperature
-                probs = torch.softmax(scaled_logits, dim=0)
-                
-                # Sample from the full distribution
-                if ensemble_temperature == 0.0:  # Deterministic selection (argmax)
-                    best_idx = torch.argmax(avg_ensemble_logits).item()
-                    chosen_token = top_k_tokens[best_idx]
-                    print(f"  → Chosen: '{chosen_token}' (deterministic, logit: {avg_ensemble_logits[best_idx]:.4f})")
-                else:  # Probabilistic selection from full vocabulary
-                    sampled_idx = torch.multinomial(probs, 1).item()
-                    chosen_token = top_k_tokens[sampled_idx]
-                    
-                    # Show top candidates
-                    top_k = 5
-                    top_indices = torch.topk(probs, min(top_k, len(top_k_tokens))).indices
-                    top_probs = [(top_k_tokens[i], probs[i].item()) for i in top_indices]
-                    
-                    print(f"  Top {len(top_probs)} candidates: {[(t, f'{p:.3f}') for t, p in top_probs]}")
-                    print(f"  → Sampled: '{chosen_token}' (prob: {probs[sampled_idx]:.4f}, logit: {avg_ensemble_logits[sampled_idx]:.4f})")
-                    
-                    # Check if this is a new token not chosen by any restart
-                    if chosen_token not in assigned_tokens:
-                        print(f"  *** NEW TOKEN discovered by ensemble! ***")
-                
-                ensemble_assignments[class_label] = chosen_token
-        
-        else:
-            raise ValueError(f"Unknown ensemble_method: {ensemble_method}")
-        
-        final_assignments = ensemble_assignments
-        final_objective = calculate_objective(final_assignments)
-        print(f"\nEnsemble objective: {final_objective}")
-        print(f"Ensemble token assignments: {final_assignments}")
-    else:
-        print(f"\n=== BEST OVERALL SOLUTION (from restart {best_restart}) ===")
-        print(f"Best objective: {best_overall_objective}")
-        print(f"Best token assignments: {best_overall_assignments}")
-        final_assignments = best_overall_assignments
-        final_objective = best_overall_objective
-
-    new_labels = {}
-    for key, value in final_assignments.items():
-        print(f"Class: {key}")
-        print(f"  Token string: '{value}'")
-        print(f"  Token ID: {tokenizer.convert_tokens_to_ids(value)}")
-        print(f"  Back to string: '{tokenizer.convert_ids_to_tokens(tokenizer.convert_tokens_to_ids(value))}'")
-        new_labels[key] = (value, tokenizer.convert_tokens_to_ids(value))
-
-    return new_labels, final_objective
-
 def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relabel, keyword, answer_field, N_RUNS=50, 
          root_folder="DATA/ICL_stability/results", ensemble_assignment=False, ensemble_method='voting', 
          ensemble_temperature=1.0, top_tokens=-1, whole_words_only=False, base_seed=42):
     
-    if n_relabel > n_examples:
-        raise ValueError(f"n_relabel ({n_relabel}) must be less than or equal to n_examples ({n_examples})")
-
     # Set a base seed that will be used to generate per-run seeds
     np.random.seed(base_seed)
     # Generate fixed seeds for each run
@@ -489,86 +183,115 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         tokens = top_tokens_dict[top_tokens]
         all_tokens = [token[1] for token in tokens]  # Get token IDs
         all_tokens_str = [token[0] for token in tokens]  # Get token strings
-    else:
-        # Load all tokens
-        file_suffix = '_whole_words' if whole_words_only else ''
-        with open(f'sentence_info/template_sentence_probs_all{file_suffix}.pkl', 'rb') as f:
-            sentence_probs = pickle.load(f)
-        with open(f'sentence_info/template_sentence_logits_all{file_suffix}.pkl', 'rb') as f:
-            sentence_logits = pickle.load(f)
-        all_tokens = list(vocab.values())  # Get all token IDs
-        all_tokens_str = list(vocab.keys())  # Get token strings
 
     # --- Loading the dataset
     datasets = load_dataset_by_name(DATASET_NAME)
     train_df = datasets['train']
     test_df = datasets['test']
+    
+    # Split training data in half
+    relabeling_df = train_df.sample(frac=0.5, random_state=base_seed)
+    demonstrations_df = train_df.drop(relabeling_df.index)
+    
+    # Reset indices
+    relabeling_df = relabeling_df.reset_index(drop=True)
+    demonstrations_df = demonstrations_df.reset_index(drop=True)
+    
+    print(f"Split training data:")
+    print(f"  Relabeling set: {len(relabeling_df)} examples")
+    print(f"  Demonstrations set: {len(demonstrations_df)} examples")
+
     if num_classes == 3:
         # keep only the rows where the emotion is Joy, Anger, or Fear and reindex the dataframe
-        train_df = train_df[train_df['emotion'].isin(['Joy', 'Anger', 'Fear'])]
-        train_df = train_df.reset_index(drop=True)
+        print("\nFiltering for 3 emotions (Joy, Anger, Fear)...")
+        relabeling_df = relabeling_df[relabeling_df['emotion'].isin(['Joy', 'Anger', 'Fear'])]
+        relabeling_df = relabeling_df.reset_index(drop=True)
+        demonstrations_df = demonstrations_df[demonstrations_df['emotion'].isin(['Joy', 'Anger', 'Fear'])]
+        demonstrations_df = demonstrations_df.reset_index(drop=True)
         test_df = test_df[test_df['emotion'].isin(['Joy', 'Anger', 'Fear'])]
         test_df = test_df.reset_index(drop=True)
+        print(f"After filtering:")
+        print(f"  Relabeling set: {len(relabeling_df)} examples")
+        print(f"  Demonstrations set: {len(demonstrations_df)} examples")
+        print(f"  Test set: {len(test_df)} examples")
 
-    # # --- Adding space to the answer field if needed
+    # --- Adding space to the answer field if needed
     if tokenizer.name_or_path in ['mistralai/Mistral-7B-v0.3']:
         pass # Mistral uses sentencepiece tokenizer, which does not require space before the answer
-
     else:
         test_df[answer_field] = " " + (test_df[answer_field].astype(str)) # Adding space before the answer
         if answer_field.endswith('_shuffled'):
             test_df[f'{answer_field[:-9]}'] = " " + (test_df[f'{answer_field[:-9]}'].astype(str)) # Adding space before the original category if we are running with category_shuffle
-
+    
     # --- Creating the ICL template
     if prefix_type != 'demos':
         N_RUNS = 1 # If the prefix is raw or instruction, we run ICL only once with 0 examples in context
 
-
-    folder_with_runs = root_folder / f"{DATASET_NAME}" / f"{MODEL_NAME}" / f"{answer_field}" / f"{prefix_type}" / f"optimized" / f"{keyword}:{n_examples}_examples" # Folder with runs for a given number of examples in context
-    folder_with_runs_gold  = root_folder / f"{DATASET_NAME}" / f"{MODEL_NAME}" / f"{answer_field}" / f"{prefix_type}" / f"gold" / f"{keyword}:{n_examples}_examples_gold" # Folder with runs for a given number of examples in context
+    # Create output folders with both n_relabel and n_examples in the path
+    folder_with_runs = (root_folder / f"{DATASET_NAME}" / f"{MODEL_NAME}" /
+                        f"relabel{n_relabel}_demo{n_examples}")
+    # folder_with_runs_gold = (root_folder / f"{DATASET_NAME}" / f"{MODEL_NAME}" / f"{answer_field}" / 
+    #                        f"{prefix_type}" / f"gold" / f"relabel{n_relabel}_demo{n_examples}")
+    
+    # Create directories if they don't exist
+    folder_with_runs.mkdir(parents=True, exist_ok=True)
+    # folder_with_runs_gold.mkdir(parents=True, exist_ok=True)
+    
     n_existing_runs = len(list(folder_with_runs.glob("run_*"))) # Number of existing runs
 
+    # Load precomputed relabeling
+    # relabeling_path = Path(f"relabelings/relabelings_{n_relabel}examples_1runs.pkl")
+    relabeling_path = Path(f"relabelings/relabelings_10000toptokens_isensembledTrue_voting_{n_relabel}examples_1runs.pkl")
+    if not relabeling_path.exists():
+        raise ValueError(f"No relabeling file found for n_relabel={n_relabel}. Please run generate_relabelings.py first.")
+    
+    print(f"\nLoading relabeling scheme from {relabeling_path}")
+    with open(relabeling_path, 'rb') as f:
+        relabeling_data = pickle.load(f)
+        
+    # Verify the relabeling configuration matches
+    relabeling_config = relabeling_data['config']
+    if relabeling_config['MODEL_NAME'] != MODEL_NAME:
+        raise ValueError(f"Relabeling model ({relabeling_config['MODEL_NAME']}) doesn't match current model ({MODEL_NAME})")
+    if relabeling_config['DATASET_NAME'] != DATASET_NAME:
+        raise ValueError(f"Relabeling dataset ({relabeling_config['DATASET_NAME']}) doesn't match current dataset ({DATASET_NAME})")
+    
+    # Get the relabeling (using first run if multiple runs exist)
+    new_labels = relabeling_data['relabelings'][0]['labels']
+    print("\nUsing relabeling scheme:")
+    for orig_label, (new_token, token_id) in new_labels.items():
+        print(f"  {orig_label} -> {new_token} (ID: {token_id})")
+
+    if num_classes == 3:
+        gold_labels = {'A': ('Ġjoy', 16267), 'C': ('Ġanger', 19788), 'D': ('Ġfear', 8850)}
+    elif num_classes == 5:
+        gold_labels = {'A': ('Ġjoy', tokenizer.convert_tokens_to_ids('Ġjoy')), 
+                       'B': ('Ġsadness', tokenizer.convert_tokens_to_ids('Ġsadness')), 
+                       'C': ('Ġanger', tokenizer.convert_tokens_to_ids('Ġanger')), 
+                       'D': ('Ġfear', tokenizer.convert_tokens_to_ids('Ġfear')), 
+                       'E': ('Ġsurprise', tokenizer.convert_tokens_to_ids('Ġsurprise'))}
 
     for k in range(N_RUNS):
         # --- Running ICL
-        print(colored(f"Running ICL with {n_examples} examples in context (using {n_relabel} for relabeling), run {k}", 'magenta'))
+        print(colored(f"\nRunning ICL - Relabeling: {n_relabel} examples, Demonstrations: {n_examples}, Run: {k+1}/{N_RUNS}", 'magenta'))
+        print(colored(f"Results will be saved to: {folder_with_runs}", 'cyan'))
 
-        # --- Creating the ICL prompt, by selecting random examples from the training data and applying the demonstrations template
-        prefix, suffix, sentences, labels = create_template(train_df, prefix_type, n_examples, keyword, answer_field, DATASET_NAME, seed=run_seeds[k])
-        print("sentences: ", sentences)
-        print("labels: ", labels)
-
-        # Use only the first n_relabel examples for optimization
-        sentences_for_relabel = sentences[:n_relabel]
-        labels_for_relabel = labels[:n_relabel]
-        print(f"\nUsing {n_relabel} examples for relabeling optimization:")
-        print("sentences for relabel: ", sentences_for_relabel)
-        print("labels for relabel: ", labels_for_relabel)
-
-        new_labels, _ = optimize_tokens(list(all_tokens_str), sentences_for_relabel, labels_for_relabel, sentence_logits, 
-                                      tokenizer=tokenizer, num_restarts=100, ensemble_assignment=ensemble_assignment, 
-                                      ensemble_method=ensemble_method, ensemble_temperature=ensemble_temperature, 
-                                      whole_words_only=whole_words_only)
-        print("new_labels: ", new_labels)
-        if num_classes == 3:
-            gold_labels = {'A': ('Ġjoy', 16267), 'C': ('Ġanger', 19788), 'D': ('Ġfear', 8850)}
-        elif num_classes == 5:
-            gold_labels = {'A': ('Ġjoy', tokenizer.convert_tokens_to_ids('Ġjoy')), 
-                           'B': ('Ġsadness', tokenizer.convert_tokens_to_ids('Ġsadness')), 
-                           'C': ('Ġanger', tokenizer.convert_tokens_to_ids('Ġanger')), 
-                           'D': ('Ġfear', tokenizer.convert_tokens_to_ids('Ġfear')), 
-                           'E': ('Ġsurprise', tokenizer.convert_tokens_to_ids('Ġsurprise'))}
+        # --- Creating the ICL prompt, by selecting random examples from the demonstrations set
+        prefix, suffix, sentences, labels = create_template(demonstrations_df, prefix_type, n_examples, keyword, answer_field, DATASET_NAME, seed=run_seeds[k])
+        print("\nSelected demonstration examples:")
+        for s, l in zip(sentences, labels):
+            print(f"Text: {s[:50]}... | Label: {l}")
 
         prefix, suffix, prefix_tokens = template_new_labels(tokenizer, sentences, labels, new_labels, keyword)
-        prefix_gold, suffix_gold, prefix_tokens_gold = template_new_labels(tokenizer, sentences, labels, gold_labels, keyword)
+        # prefix_gold, suffix_gold, prefix_tokens_gold = template_new_labels(tokenizer, sentences, labels, gold_labels, keyword)
 
         suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
-        suffix_tokens_gold = tokenizer.encode(suffix_gold, add_special_tokens=False)
+        # suffix_tokens_gold = tokenizer.encode(suffix_gold, add_special_tokens=False)
         print('Suffix tokens:', [tokenizer.decode([t]) for t in suffix_tokens])
         suffix_crop = len(suffix_tokens) - 1 # Number of tokens in the suffix to crop (-1 because \n will get fused with "." token at the end of the sentence)
 
         test_df['text_with_suffix'] = 'Text: ' + test_df['text'] + suffix
-        test_df['text_with_suffix_gold'] = 'Text: ' + test_df['text'] + suffix_gold
+        # test_df['text_with_suffix_gold'] = 'Text: ' + test_df['text'] + suffix_gold
         test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][0])
         test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][1])
         test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[x[1:]][0])
@@ -580,10 +303,10 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
                          return_hidden_states=True, batch_size=10,
                          prefix_tokens=prefix_tokens,  # Use prefix_tokens instead of prefix_text
                          return_raw_batches=True, new_labels=new_labels)
-        output_gold = run_on_dataframe(test_df, model, tokenizer, 'text_with_suffix_gold', answer_field='gold_label_id', 
-                         return_hidden_states=True, batch_size=10,
-                         prefix_tokens=prefix_tokens_gold,  # Use prefix_tokens instead of prefix_text
-                         return_raw_batches=True, new_labels=gold_labels)
+        # output_gold = run_on_dataframe(test_df, model, tokenizer, 'text_with_suffix_gold', answer_field='gold_label_id', 
+        #                          return_hidden_states=True, batch_size=10,
+        #                          prefix_tokens=prefix_tokens_gold,  # Use prefix_tokens instead of prefix_text
+        #                          return_raw_batches=True, new_labels=gold_labels)
         # --- Computing the metrics
         if answer_field.endswith('_shuffled'):
             # If we are running with _shuffled, also compute the accuracy for the original category
@@ -603,10 +326,11 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
 
         CONFIG = {
             'MODEL_NAME': MODEL_NAME,
-            "DATASET_NAME": DATASET_NAME,
+            'DATASET_NAME': DATASET_NAME,
             'num_classes': num_classes,
             'prefix_type': prefix_type,
             'n_examples': n_examples,
+            'n_relabel': n_relabel,  # Add n_relabel to CONFIG
             'keyword': keyword,
             'answer_field' : answer_field,
             'run' : k,
@@ -616,16 +340,17 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
             'ensemble_method': ensemble_method,
             'ensemble_temperature': ensemble_temperature,
             'whole_words_only': whole_words_only,
+            'relabeling_path': str(relabeling_path)  # Also add the relabeling path for reference
         }
 
         total_run_id = n_existing_runs + k # Total number of runs
         save_folder_output  = folder_with_runs / f"run_{total_run_id}" 
-        save_folder_gold = folder_with_runs_gold / f"run_{total_run_id}"
+        # save_folder_gold = folder_with_runs_gold / f"run_{total_run_id}"
 
         save_outputs(output, save_folder_output, CONFIG)
         print(colored(f"Results saved to {save_folder_output}", 'green'))
-        save_outputs(output_gold, save_folder_gold, CONFIG)
-        print(colored(f"Results saved to {save_folder_gold}", 'green'))
+        # save_outputs(output_gold, save_folder_gold, CONFIG)
+        # print(colored(f"Results saved to {save_folder_gold}", 'green'))
 
 
 
@@ -647,30 +372,85 @@ def main_SLURM():
         sys.exit(0)
     
     config = job_configs[job_idx]
+    print(f"Running with config: {config}")  # Print config for debugging
+    
+    # Convert config keys to match main() parameter names
+    config_mapping = {
+        'model': 'MODEL_NAME',
+        'dataset': 'DATASET_NAME',
+        'n_runs': 'N_RUNS'
+    }
+    
+    # Rename keys to match main() parameters
+    for old_key, new_key in config_mapping.items():
+        if old_key in config:
+            config[new_key] = config.pop(old_key)
+    
     main(**config)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    
     # Check if running with SLURM arguments
     if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        # Running with SLURM
-        main_SLURM()
+        # SLURM mode
+        parser.add_argument("jobind", help="ID of the job (SLURM_ARRAY_TASK_ID)")
+        parser.add_argument("job_configs_file", help="Path to the JSON file containing job configurations")
+        args = parser.parse_args()
+        
+        # Load job configurations
+        with open(args.job_configs_file, 'r') as f:
+            job_configs = json.load(f)
+        
+        # Get the configuration for this job
+        job_idx = int(args.jobind)
+        if job_idx >= len(job_configs):
+            print(f"Job index {job_idx} is out of range (total configs: {len(job_configs)})")
+            sys.exit(0)
+        
+        config = job_configs[job_idx]
+        print(f"Running with config: {config}")  # Print config for debugging
+        main(**config)
+        
     else:
-        # Example of how to run the script manually
-        main(
-            MODEL_NAME = 'llama3.1_base',
-            DATASET_NAME = 'claude_multitask',
-            num_classes = 3,
-            prefix_type = 'demos',
-            n_examples = 40,
-            n_relabel = 40,
-            keyword = 'Category',
-            answer_field = 'emotion_letter',
-            N_RUNS = 1,
-            root_folder = "temp_new/ICL_results_regularization",
-            ensemble_assignment = True,
-            ensemble_method = 'logit_averaging',
-            ensemble_temperature = 0,  # Use 0 for deterministic selection
-            top_tokens = 5000,  # Use top 5000 tokens
-            whole_words_only = True  # Only use whole word tokens
-        )
+        # Command line mode
+        parser.add_argument("--model", default="llama3.1_base", help="Model name")
+        parser.add_argument("--dataset", default="claude_multitask", help="Dataset name")
+        parser.add_argument("--num_classes", type=int, default=3, help="Number of classes")
+        parser.add_argument("--prefix_type", default="demos", help="Prefix type")
+        parser.add_argument("--n_examples", type=int, required=True, help="Number of examples in context")
+        parser.add_argument("--n_relabel", type=int, required=True, help="Number of examples used for relabeling")
+        parser.add_argument("--keyword", default="Category", help="Keyword")
+        parser.add_argument("--answer_field", default="emotion_letter", help="Answer field")
+        parser.add_argument("--n_runs", type=int, default=10, help="Number of runs")
+        parser.add_argument("--root_folder", default="test_relabelings", help="Root folder for results")
+        parser.add_argument("--ensemble_assignment", type=bool, default=False, help="Whether to use ensemble assignment")
+        parser.add_argument("--ensemble_method", default="logit_averaging", help="Ensemble method")
+        parser.add_argument("--ensemble_temperature", type=float, default=0, help="Ensemble temperature")
+        parser.add_argument("--top_tokens", type=int, default=128256, help="Number of top tokens")
+        parser.add_argument("--whole_words_only", type=bool, default=True, help="Whether to use only whole words")
+        parser.add_argument("--seed", type=int, default=42, help="Random seed")
+        
+        args = parser.parse_args()
+        
+        # Convert args to match main() parameter names
+        config = {
+            'MODEL_NAME': args.model,
+            'DATASET_NAME': args.dataset,
+            'num_classes': args.num_classes,
+            'prefix_type': args.prefix_type,
+            'n_examples': args.n_examples,
+            'n_relabel': args.n_relabel,
+            'keyword': args.keyword,
+            'answer_field': args.answer_field,
+            'N_RUNS': args.n_runs,
+            'root_folder': args.root_folder,
+            'ensemble_assignment': args.ensemble_assignment,
+            'ensemble_method': args.ensemble_method,
+            'ensemble_temperature': args.ensemble_temperature,
+            'top_tokens': args.top_tokens,
+            'whole_words_only': args.whole_words_only,
+            'base_seed': args.seed
+        }
+        main(**config)

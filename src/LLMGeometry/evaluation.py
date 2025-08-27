@@ -118,6 +118,12 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
         batch_prefix = prepare_batch([{'text': prefix_text}], model, tokenizer)
         prefix_seq_len = batch_prefix['attention_mask'].shape[1]
 
+    # Handle empty prefix case - return None for past_key_values and empty attention mask
+    if prefix_seq_len == 0:
+        print(colored("Empty prefix detected - returning None for past_key_values", 'yellow'))
+        empty_attention_mask = torch.zeros((1, 0), device=model.device).to(torch.bfloat16)
+        return None, empty_attention_mask
+
     if model.name_or_path == 'google/gemma-2-2b':
         # Since Gemma uses sliding window attention, caching is done with HybridCache, rather than tuple of tensors
         kv_cache = HybridCache(config=model.config, max_batch_size=1, max_cache_len=prefix_seq_len + 100, device="cuda", dtype=torch.bfloat16)
@@ -190,11 +196,11 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
     if prefix_text is None and prefix_tokens is None:
         prefix_text = '' # If no prefix text or tokens are provided, we use an empty string
     
-    if prefix_tokens is not None:
-        print("Using pre-tokenized prefix_tokens")
-        print("prefix_tokens: ", prefix_tokens)
-    else:
-        print("prefix_text: ", prefix_text)
+    # if prefix_tokens is not None:
+    #     print("Using pre-tokenized prefix_tokens")
+    #     print("prefix_tokens: ", prefix_tokens)
+    # else:
+    #     print("prefix_text: ", prefix_text)
 
 
     if not (answer_field is None):
@@ -226,10 +232,11 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
 
     # --- For Gemma models, we need to .expand().clone() the past key values to the max batch size first
     if model.name_or_path == 'google/gemma-2-2b':
-        for layer_idx in range(len(past_key_values.key_cache)):
-            past_key_values.key_cache[layer_idx] = past_key_values.key_cache[layer_idx].expand(batch_size, -1, -1,-1).clone()
-            past_key_values.value_cache[layer_idx] = past_key_values.value_cache[layer_idx].expand(batch_size, -1, -1,-1).clone()
-        print(colored("Expanded past key values", 'green'))
+        if past_key_values is not None:  # Only expand if past_key_values is not None
+            for layer_idx in range(len(past_key_values.key_cache)):
+                past_key_values.key_cache[layer_idx] = past_key_values.key_cache[layer_idx].expand(batch_size, -1, -1,-1).clone()
+                past_key_values.value_cache[layer_idx] = past_key_values.value_cache[layer_idx].expand(batch_size, -1, -1,-1).clone()
+            print(colored("Expanded past key values", 'green'))
 
 
 
@@ -245,18 +252,30 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
             attention_mask = tokenized_batch['attention_mask']
             correct_labels = tokenized_batch['correct_labels']
             
-            concatenated_attention_mask = torch.cat([prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
-            concatenated_attention_mask_empty_prompt = torch.cat([empty_prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
+            # Handle concatenation when prefix_attention_mask might be empty (0 length)
+            if prefix_attention_mask.shape[1] > 0:
+                concatenated_attention_mask = torch.cat([prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
+            else:
+                concatenated_attention_mask = tokenized_batch['attention_mask']
+                
+            if empty_prefix_attention_mask.shape[1] > 0:
+                concatenated_attention_mask_empty_prompt = torch.cat([empty_prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
+            else:
+                concatenated_attention_mask_empty_prompt = tokenized_batch['attention_mask']
+            
+            # Handle past_key_values that might be None (for empty prefix)
+            past_kv_expanded = expand_KV(past_key_values, len(batch)) if past_key_values is not None else None
+            empty_past_kv_expanded = expand_KV(empty_past_key_values, len(batch)) if empty_past_key_values is not None else None
             
             output = hooked_forward_pass(model,tokenized_batch['input_embeds'],
                                         attention_mask=concatenated_attention_mask,
                                         correct_labels=correct_labels,
-                                        past_key_values=expand_KV(past_key_values, len(batch))
+                                        past_key_values=past_kv_expanded
                                     )
             output_empty_prompt = hooked_forward_pass(model,tokenized_batch['input_embeds'],
                                         attention_mask=concatenated_attention_mask_empty_prompt,
                                         correct_labels=correct_labels,
-                                        past_key_values=expand_KV(empty_past_key_values, len(batch))
+                                        past_key_values=empty_past_kv_expanded
                                     )
             
             prediction = get_predictions_from_logits(output['output'].logits, attention_mask, N=3, target_token_offset=target_token_offset_performance)
@@ -271,9 +290,9 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
             #print("prediction shape: ", prediction[0].shape)
             # pred shape is batch x top N
             # print("prediction: ", prediction[0][0]) # top N predictions for the first batch example
-            print("prediction for full batch top 1: ", prediction[0][:,0])
-            print("prediction tokens for full batch top 1: ", tokenizer.convert_ids_to_tokens(prediction[0][:, 0]))
-            print("prediction probabilities for full batch top 1: ", prediction[1][:, 0])
+            # print("prediction for full batch top 1: ", prediction[0][:,0])
+            # print("prediction tokens for full batch top 1: ", tokenizer.convert_ids_to_tokens(prediction[0][:, 0]))
+            # print("prediction probabilities for full batch top 1: ", prediction[1][:, 0])
 
             # print("prediction for empty prompt top 1: ", prediction_empty_prompt[0][:,0])
             # print("prediction tokens for empty prompt top 1: ", tokenizer.convert_ids_to_tokens(prediction_empty_prompt[0][:, 0]))
@@ -289,7 +308,7 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
                 target_token_ids = take_last_from_attention_mask(tokenized_batch['correct_labels'], tokenized_batch['attention_mask'])
                 target_labels = [b[answer_field] for b in batch]
                 # print("target_labels: ", target_labels)
-                print("target labels tokens", tokenizer.convert_ids_to_tokens(target_labels))
+                # print("target labels tokens", tokenizer.convert_ids_to_tokens(target_labels))
                 # Probability of correct output
                 correct_output_probs = get_token_probability(
                     torch.softmax(output['output'].logits, dim=2), target_labels , 
@@ -299,8 +318,8 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
                     torch.softmax(output_empty_prompt['output'].logits, dim=2), target_labels , 
                     tokenizer=tokenizer, attention_mask=tokenized_batch['attention_mask'],
                     by_element_in_batch=True, target_token_offset=target_token_offset_performance)
-                print("correct_output_probs: ", correct_output_probs)
-                print("correct_output_probs_empty_prompt: ", correct_output_probs_empty_prompt)      
+                # print("correct_output_probs: ", correct_output_probs)
+                # print("correct_output_probs_empty_prompt: ", correct_output_probs_empty_prompt)      
                 acc_scope_logits, acc_scope_probs = [], []
                 for b_idx in range(len(batch)):
                     acc_scope_logits.append({t: target_logits[b_idx, t].item() for t in outputs_scope})

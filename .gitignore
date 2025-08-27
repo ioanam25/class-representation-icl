@@ -24,3 +24,16 @@ Thumbs.db
 # IDE / Editor specific
 .vscode/
 .idea/
+
+*.png
+*.scr
+learning_curves_relabel_demos/
+logs/
+models/
+plots/
+relabelings/
+test_relabelings/
+tokenizers/
+experiments/models/
+experiments/tokenizers/
+sentence_info/

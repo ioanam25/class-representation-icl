@@ -81,6 +81,8 @@ def expand_KV(past_key_values, batch_size):
     '''
         Expand the past key-values to the specified batch size (when passed a tuple of tensors).
     '''
+    if past_key_values is None:  # Handle None (empty prefix) case
+        return None
     if isinstance(past_key_values, HybridCache): # If past_key_values is a HybridCache object, we return it as is
         return past_key_values
     return [[x.expand(batch_size, -1, -1, -1) for x in past_key_values[n_layer]] for n_layer in range(len(past_key_values))]
