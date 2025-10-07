@@ -2,7 +2,7 @@
 
 This repository contains the code and data for the paper "On the Relationship Between the Choice of Representation and In-Context Learning".
 
-![Cover Image](fig1v2.pdf)
+![Cover Image](fig1v2.png)
 
 ## Description
 
@@ -15,11 +15,11 @@ The workflow is designed to:
 
 ## Workflow and Usage
 
-The main workflow consists of three steps. Ensure you run them in the specified order:
+The main workflow consists of three steps.
 
 ### 1. Precompute Weights
 
-First, use `precompute_weights.py` to process your dataset and calculate the next token probabilities for each sentence. This step is necessary to prepare the data for the subsequent experiments.
+First, use `precompute_weights.py` to process your dataset and calculate the next token (class name) probabilities for each sentence. This step is necessary to prepare the data for the subsequent experiments.
 
 ```bash
 python precompute_weights.py
@@ -40,3 +40,7 @@ Finally, use `run_icl_relabel.py` to execute the in-context learning experiments
 ```bash
 python experiments/run_icl_relabel.py
 ```
+
+## Credits
+
+This repository builds upon the work from [The Geometry of Prompting](https://github.com/ArtemKirsanov/geometry-of-prompting) by [@ArtemKirsanov](https://github.com/ArtemKirsanov).
