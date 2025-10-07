@@ -6,8 +6,8 @@ __pycache__/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
-.ipynb
-.sh
+*.ipynb
+*.sh
 
 # Distribution / packaging
 dist/
@@ -45,4 +45,11 @@ bootstrap_results/
 experiments/icl_configs*
 experiments/run_icl_slurm*
 experiments/generate_icl_configs*
-.
+experiments/analysis_ICL.py
+experiments/compute_capacity.py
+experiments/plot_accuracy.py
+bootstrap.sh
+src/LLMGeometry/gcmc.py
+src/LLMGeometry/prompt_tuning.py
+src/LLMGeometry/results_aggregation.py
+run_all_relabelings.sh
