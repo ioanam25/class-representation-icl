@@ -13,7 +13,7 @@ def main(MODEL_NAME='llama3.1_base',
          num_classes=3,
          n_relabel_list=None,  # Now takes a list of n_relabel values
          n_runs=1,
-         top_tokens=128256,
+         top_tokens=10000,
          whole_words_only=True,
          ensemble_assignment=True,
          ensemble_method='logit_averaging',
@@ -53,9 +53,9 @@ def main(MODEL_NAME='llama3.1_base',
     # Load precomputed logits
     print("\nLoading precomputed logits...")
     file_suffix = '_whole_words' if whole_words_only else ''
-    with open(f'sentence_info/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+    with open(f'7B_sentence_info/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
         sentence_probs = pickle.load(f)
-    with open(f'sentence_info/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+    with open(f'7B_sentence_info/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
         sentence_logits = pickle.load(f)
     
     # Get tokens
@@ -92,7 +92,7 @@ def main(MODEL_NAME='llama3.1_base',
         )
         
         # Save results for this n_relabel
-        save_dir = Path("relabelings")
+        save_dir = Path("7B_relabelings")
         save_dir.mkdir(exist_ok=True)
         
         config = {
@@ -109,7 +109,7 @@ def main(MODEL_NAME='llama3.1_base',
             'base_seed': base_seed
         }
         
-        save_path = save_dir / f"relabelings_{top_tokens}toptokens_isensembled{ensemble_assignment}_{ensemble_method}_{n_relabel}examples_{n_runs}runs.pkl"
+        save_path = save_dir / f"7B_relabelings_{num_classes}classes_{top_tokens}toptokens_isensembled{ensemble_assignment}_{ensemble_method}_{n_relabel}examples_{n_runs}runs.pkl"
         with open(save_path, 'wb') as f:
             pickle.dump({
                 'config': config,
@@ -138,13 +138,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="llama3.1_base", help="Model name")
     parser.add_argument("--dataset", default="claude_multitask", help="Dataset name")
-    parser.add_argument("--num_classes", type=int, default=3, help="Number of classes")
+    parser.add_argument("--num_classes", type=int, default=5, help="Number of classes")
     parser.add_argument("--n_relabel_list", type=str, default="10,20,30,40,50,60,70,80,90,100", 
                       help="Comma-separated list of n_relabel values")
     parser.add_argument("--n_runs", type=int, default=1, help="Number of relabelings to generate per n_relabel")
-    parser.add_argument("--top_tokens", type=int, default=10000, help="Number of top tokens to use")
+    parser.add_argument("--top_tokens", type=int, default=128256, help="Number of top tokens to use")
     parser.add_argument("--whole_words_only", type=bool, default=True, help="Whether to use only whole word tokens")
-    parser.add_argument("--ensemble_assignment", type=bool, default=True, help="Whether to use ensemble assignment")
+    parser.add_argument("--ensemble_assignment", type=bool, default=False, help="Whether to use ensemble assignment")
     parser.add_argument("--ensemble_method", default="voting", help="Ensemble method (voting or logit_averaging)")
     parser.add_argument("--ensemble_temperature", type=float, default=0, help="Temperature for logit averaging")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

@@ -3,14 +3,14 @@ from pathlib import Path
 
 def generate_configs():
     base_config = {
-        'MODEL_NAME': 'llama3.1_base',
+        'MODEL_NAME': 'llama3.1_70b_instruct',
         'DATASET_NAME': 'claude_multitask',
-        'num_classes': 3,
+        'num_classes': 5,
         'prefix_type': 'demos',
-        'keyword': 'Category',
+        'keyword': 'Category',  
         'answer_field': 'emotion_letter',
         'N_RUNS': 10,
-        'root_folder': "learning_curves_relabel_demos",
+        'root_folder': "learning_curves_relabel_demos_5classes_70b",
         'ensemble_assignment': False,
         'ensemble_method': 'logit_averaging',
         'ensemble_temperature': 0,
@@ -22,9 +22,10 @@ def generate_configs():
     configs = []
     
     # For each n_relabel (10, 20, ..., 100)
-    for n_relabel in range(10, 101, 10):
+    # for n_relabel in [10, 20, 30, 40, 60, 70]:
+    for n_relabel in [10, 20, 30, 40, 50, 60, 70, 90, 100]:
         # For each n_examples (0 to 100)
-        for n_examples in range(0, 101):
+        for n_examples in range(0, 41, 10):
             config = base_config.copy()
             config['n_relabel'] = n_relabel
             config['n_examples'] = n_examples
@@ -34,7 +35,7 @@ def generate_configs():
     output_dir = Path('experiments')
     # output_dir.mkdir(exist_ok=True)
     
-    output_file = output_dir / 'icl_configs.json'
+    output_file = output_dir / 'icl_configs_5classes_70b_5classes.json'
     with open(output_file, 'w') as f:
         json.dump(configs, f, indent=2)
     

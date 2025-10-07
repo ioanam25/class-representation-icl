@@ -6,6 +6,8 @@ __pycache__/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
+.ipynb
+.sh
 
 # Distribution / packaging
 dist/
@@ -27,13 +29,20 @@ Thumbs.db
 
 *.png
 *.scr
-learning_curves_relabel_demos/
-logs/
+learning_curves_relabel_demos*/
+all_relabelings*/
+logs*/
 models/
-plots/
+plots*/
+old_plots*/
 relabelings/
 test_relabelings/
 tokenizers/
 experiments/models/
 experiments/tokenizers/
 sentence_info/
+bootstrap_results/
+experiments/icl_configs*
+experiments/run_icl_slurm*
+experiments/generate_icl_configs*
+.

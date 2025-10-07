@@ -15,7 +15,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score
 import glob
 
-MODEL_NAME = 'llama3.1_base'
+MODEL_NAME = 'llama3.1_70b_instruct'
 DATASET_NAME = 'claude_multitask'
 prefix_type = 'demos'
 n_examples = 5
@@ -230,12 +230,12 @@ if __name__ == '__main__':
         # Compute for top 4000 whole words
         sentence_probs, sentence_logits = precompute_W_forward_pass(
             sentences, 
-            top_k_tokens=top_k_tokens[128256],
-            whole_words_only=False
+            top_k_tokens=top_k_tokens[10000],
+            whole_words_only=True
         )
         
         # Save results
-        with open('sentence_info/template_sentence_probs_128256.pkl', 'wb') as f:
+        with open('70B_sentence_info/template_sentence_probs_10000_whole_words.pkl', 'wb') as f:
             pickle.dump(sentence_probs, f)
-        with open('sentence_info/template_sentence_logits_128256.pkl', 'wb') as f:
+        with open('70B_sentence_info/template_sentence_logits_10000_whole_words.pkl', 'wb') as f:
             pickle.dump(sentence_logits, f)

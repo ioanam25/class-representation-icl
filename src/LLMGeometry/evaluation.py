@@ -1,4 +1,6 @@
 import LLMGeometry.models.llama3_8b_base.evaluation
+import LLMGeometry.models.llama3_1b_base.evaluation
+import LLMGeometry.models.llama3_70b_instruct.evaluation
 import LLMGeometry.models.gemma2_2b_base.evaluation
 import LLMGeometry.models.mistral_7b_base.evaluation
 from LLMGeometry.preprocessing import prepare_batch, DataFrameDataset
@@ -59,6 +61,10 @@ def hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=None
     '''
     if model.name_or_path == 'meta-llama/Meta-Llama-3-8B' or model.name_or_path == 'meta-llama/Meta-Llama-3.1-8B':
         return LLMGeometry.models.llama3_8b_base.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
+    if model.name_or_path == 'meta-llama/Llama-3.2-1B':
+        return LLMGeometry.models.llama3_1b_base.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
+    if model.name_or_path == '/gpfs/data/oermannlab/public_models/llama_models_hf/llama-3.1-70b-instruct':
+        return LLMGeometry.models.llama3_70b_instruct.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
     if model.name_or_path == 'meta-llama/Meta-Llama-3-8B-Instruct':
         return LLMGeometry.models.llama3_8b_instruct.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
     if model.name_or_path == 'gpt2-xl':
@@ -73,7 +79,15 @@ def hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=None
 def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
     '''
         Cache the prefix text or tokens in the model's past key values.
+        Returns a DynamicCache object compatible with newer transformers versions.
     '''
+    from transformers.cache_utils import DynamicCache
+    
+    # Ensure CUDA is properly initialized
+    if torch.cuda.is_available():
+        torch.cuda.init()
+        device = model.device
+        print(f"Using device: {device}")
 
     if isinstance(prefix_text, torch.Tensor):
         # If we are provided a tensor, assume is the input embeddings (e.g. a soft prompt from prompt tuning)
@@ -82,7 +96,7 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
             prefix_text = prefix_text.unsqueeze(0)
             print(colored("Unsqueezed prefix text tensor", 'yellow'))
 
-        batch_prefix = {'input_embeds': prefix_text, 'attention_mask': torch.ones(prefix_text.shape[:2], device=prefix_text.device).to(torch.bfloat16).to(model.device)}
+        batch_prefix = {'input_embeds': prefix_text, 'attention_mask': torch.ones(prefix_text.shape[:2], device=model.device, dtype=torch.long)}
         prefix_seq_len = prefix_text.shape[1]
         
     elif prefix_tokens is not None:
@@ -109,7 +123,7 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
             
         batch_prefix = {
             'input_embeds': input_embeds, 
-            'attention_mask': torch.ones(token_ids.shape, device=model.device).to(torch.bfloat16)
+            'attention_mask': torch.ones(token_ids.shape, device=model.device, dtype=torch.long)
         }
         prefix_seq_len = token_ids.shape[1]
         
@@ -121,7 +135,7 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
     # Handle empty prefix case - return None for past_key_values and empty attention mask
     if prefix_seq_len == 0:
         print(colored("Empty prefix detected - returning None for past_key_values", 'yellow'))
-        empty_attention_mask = torch.zeros((1, 0), device=model.device).to(torch.bfloat16)
+        empty_attention_mask = torch.zeros((1, 0), device=model.device, dtype=torch.long)
         return None, empty_attention_mask
 
     if model.name_or_path == 'google/gemma-2-2b':
@@ -135,13 +149,25 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
 
     # For other models, caching is done with tuple of tensors
     with torch.no_grad():
-        past_key_values = model(inputs_embeds=batch_prefix['input_embeds'], attention_mask=batch_prefix['attention_mask'], use_cache=True).past_key_values
+        # Create a new dynamic cache
+        cache = DynamicCache()
+        
+        # Ensure all tensors are on the correct device
+        inputs_embeds = batch_prefix['input_embeds'].to(model.device)
+        attention_mask = batch_prefix['attention_mask'].to(model.device)
+        
+        # Run model and update cache
+        outputs = model(inputs_embeds=inputs_embeds, 
+                       attention_mask=attention_mask, 
+                       use_cache=True, 
+                       past_key_values=cache)
+        past_key_values = outputs.past_key_values
     print(colored("Cached prefix text", 'green'))
     return past_key_values, batch_prefix['attention_mask']
 
 
 def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_field=None, soft_embeds=None, soft_prompt_location='before', 
-                     prefix_text=None, prefix_tokens=None, return_hidden_states=True, return_MLP_intermediate=False, return_queries=False, return_keys=False, return_values=False,
+                     prefix_text=None, prefix_tokens=None, return_hidden_states=False, return_MLP_intermediate=False, return_queries=False, return_keys=False, return_values=False,
                      batch_size=10, 
                      target_token_offset_performance=0, target_token_offset_activations=0, return_raw_batches=True, keep_KV_batched=False, new_labels=None):
     '''
@@ -227,8 +253,16 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
 
     print("prefix_text: ", prefix_text)
     # Cache the prefix text in the model's past key values
-    past_key_values, prefix_attention_mask = cache_prefix_text(model, tokenizer, prefix_text=prefix_text, prefix_tokens=prefix_tokens)
-    empty_past_key_values, empty_prefix_attention_mask = cache_prefix_text(model, tokenizer, prefix_text='', prefix_tokens=None)
+    # Use the new Cache format from transformers
+    from transformers.cache_utils import DynamicCache
+    
+    # Initialize cache as None
+    past_key_values = None
+    prefix_attention_mask = torch.zeros((1, 0), device=model.device, dtype=torch.long)
+    
+    # Only cache if we have a prefix
+    if prefix_text is not None or prefix_tokens is not None:
+        past_key_values, prefix_attention_mask = cache_prefix_text(model, tokenizer, prefix_text=prefix_text, prefix_tokens=prefix_tokens)
 
     # --- For Gemma models, we need to .expand().clone() the past key values to the max batch size first
     if model.name_or_path == 'google/gemma-2-2b':
@@ -244,47 +278,50 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
         if return_raw_batches:
             acc_batches.append(batch)
 
+        # Clear GPU memory before processing each batch to prevent OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Wait for GPU operations to complete
+            import gc
+            gc.collect()
+            # Print memory usage for debugging
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"DEBUG: GPU memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+
         with torch.no_grad():
             tokenized_batch = prepare_batch(batch, model, tokenizer, soft_prompt_embeds=soft_embeds, soft_prompt_location=soft_prompt_location, prompt_text_field=prompt_text_field,answer_field=answer_field, add_special_tokens=False)
-            # make another tokenized batch where the prompt is empty and evaluate the same thing
-            # tokenized_batch_empty_prompt = prepare_batch(batch, model, tokenizer, soft_prompt_embeds=None, soft_prompt_location=None, prompt_text_field=None, answer_field=None, add_special_tokens=False)
 
+            # Debug: Print batch info right after tokenization
             attention_mask = tokenized_batch['attention_mask']
             correct_labels = tokenized_batch['correct_labels']
+            print(f"DEBUG: Batch size: {attention_mask.shape[0]}, Sequence length: {attention_mask.shape[1]}")
+            print(f"DEBUG: Input embeds shape: {tokenized_batch['input_embeds'].shape}")
+            print(f"DEBUG: About to call hooked_forward_pass...")
             
             # Handle concatenation when prefix_attention_mask might be empty (0 length)
             if prefix_attention_mask.shape[1] > 0:
                 concatenated_attention_mask = torch.cat([prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
+                print(f"DEBUG: Prefix length: {prefix_attention_mask.shape[1]}, Test input length: {tokenized_batch['attention_mask'].shape[1]}")
+                print(f"DEBUG: TOTAL concatenated sequence length: {concatenated_attention_mask.shape[1]}")
             else:
                 concatenated_attention_mask = tokenized_batch['attention_mask']
-                
-            if empty_prefix_attention_mask.shape[1] > 0:
-                concatenated_attention_mask_empty_prompt = torch.cat([empty_prefix_attention_mask.expand(len(batch), -1), tokenized_batch['attention_mask']],1)
-            else:
-                concatenated_attention_mask_empty_prompt = tokenized_batch['attention_mask']
+                print(f"DEBUG: No prefix, using test input length: {concatenated_attention_mask.shape[1]}")
             
             # Handle past_key_values that might be None (for empty prefix)
             past_kv_expanded = expand_KV(past_key_values, len(batch)) if past_key_values is not None else None
-            empty_past_kv_expanded = expand_KV(empty_past_key_values, len(batch)) if empty_past_key_values is not None else None
             
             output = hooked_forward_pass(model,tokenized_batch['input_embeds'],
                                         attention_mask=concatenated_attention_mask,
                                         correct_labels=correct_labels,
                                         past_key_values=past_kv_expanded
                                     )
-            output_empty_prompt = hooked_forward_pass(model,tokenized_batch['input_embeds'],
-                                        attention_mask=concatenated_attention_mask_empty_prompt,
-                                        correct_labels=correct_labels,
-                                        past_key_values=empty_past_kv_expanded
-                                    )
             
             prediction = get_predictions_from_logits(output['output'].logits, attention_mask, N=3, target_token_offset=target_token_offset_performance)
-            prediction_empty_prompt = get_predictions_from_logits(output_empty_prompt['output'].logits, attention_mask, N=3, target_token_offset=target_token_offset_performance)
             
             # Constrained predictions (only over valid class tokens)
             if answer_field is not None:
                 prediction_constrained = get_predictions_from_logits(output['output'].logits, attention_mask, N=3, target_token_offset=target_token_offset_performance, constrained_token_ids=list(outputs_scope))
-                prediction_empty_prompt_constrained = get_predictions_from_logits(output_empty_prompt['output'].logits, attention_mask, N=3, target_token_offset=target_token_offset_performance, constrained_token_ids=list(outputs_scope))
             
             # prediction 0 is ids, prediction 1 is probs
             #print("prediction shape: ", prediction[0].shape)
@@ -294,15 +331,10 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
             # print("prediction tokens for full batch top 1: ", tokenizer.convert_ids_to_tokens(prediction[0][:, 0]))
             # print("prediction probabilities for full batch top 1: ", prediction[1][:, 0])
 
-            # print("prediction for empty prompt top 1: ", prediction_empty_prompt[0][:,0])
-            # print("prediction tokens for empty prompt top 1: ", tokenizer.convert_ids_to_tokens(prediction_empty_prompt[0][:, 0]))
-            # print("prediction probabilities for empty prompt top 1: ", prediction_empty_prompt[1][:, 0])
+
 
             target_logits = take_last_from_attention_mask(output['output'].logits, tokenized_batch['attention_mask'])
             target_probs = torch.nn.functional.softmax(target_logits, dim=-1)
-
-            target_logits_empty_prompt = take_last_from_attention_mask(output_empty_prompt['output'].logits, tokenized_batch['attention_mask'])
-            target_probs_empty_prompt = torch.nn.functional.softmax(target_logits_empty_prompt, dim=-1)
 
             if answer_field is not None:
                 target_token_ids = take_last_from_attention_mask(tokenized_batch['correct_labels'], tokenized_batch['attention_mask'])
@@ -314,12 +346,8 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
                     torch.softmax(output['output'].logits, dim=2), target_labels , 
                     tokenizer=tokenizer, attention_mask=tokenized_batch['attention_mask'],
                     by_element_in_batch=True, target_token_offset=target_token_offset_performance)
-                correct_output_probs_empty_prompt = get_token_probability(
-                    torch.softmax(output_empty_prompt['output'].logits, dim=2), target_labels , 
-                    tokenizer=tokenizer, attention_mask=tokenized_batch['attention_mask'],
-                    by_element_in_batch=True, target_token_offset=target_token_offset_performance)
                 # print("correct_output_probs: ", correct_output_probs)
-                # print("correct_output_probs_empty_prompt: ", correct_output_probs_empty_prompt)      
+      
                 acc_scope_logits, acc_scope_probs = [], []
                 for b_idx in range(len(batch)):
                     acc_scope_logits.append({t: target_logits[b_idx, t].item() for t in outputs_scope})
@@ -349,17 +377,12 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
             acc_metrics.append({
                 'target_token' : target_token_ids[i].item() if answer_field is not None else None,
                 'correct_output_prob': correct_output_probs[i] if answer_field is not None else None,
-                'correct_output_prob_empty_prompt': correct_output_probs_empty_prompt[i] if answer_field is not None else None,
                 'scope_logits': acc_scope_logits[i] if answer_field is not None else None,
                 'scope_probs': acc_scope_probs[i] if answer_field is not None else None,
                 'predicted_output_tokens': prediction[0][i],
                 'predicted_output_probs': prediction[1][i],
-                'predicted_output_tokens_empty_prompt': prediction_empty_prompt[0][i],
-                'predicted_output_probs_empty_prompt': prediction_empty_prompt[1][i],
                 'predicted_output_tokens_constrained': prediction_constrained[0][i] if answer_field is not None else None,
                 'predicted_output_probs_constrained': prediction_constrained[1][i] if answer_field is not None else None,
-                'predicted_output_tokens_empty_prompt_constrained': prediction_empty_prompt_constrained[0][i] if answer_field is not None else None,
-                'predicted_output_probs_empty_prompt_constrained': prediction_empty_prompt_constrained[1][i] if answer_field is not None else None,
             })
             if return_hidden_states:
                 acc_hidden_states.append(stacked_hidden_states[:, i, tokenized_batch['attention_mask'][i].to(bool),  :]) # (layer, sequence_length, hidden_dim)
@@ -375,7 +398,41 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
             acc_keys.append(stacked_keys)
         if return_values:
             acc_values.append(stacked_values)
-        acc_attention_masks.append(attention_mask)
+        # Move attention_mask to CPU immediately to free GPU memory
+        acc_attention_masks.append(attention_mask.cpu())
+        
+        # CRITICAL: Clear accumulated GPU tensors to prevent memory leak
+        # Move any GPU tensors to CPU immediately after appending
+        if acc_hidden_states:
+            for i in range(len(acc_hidden_states)):
+                if isinstance(acc_hidden_states[i], torch.Tensor) and acc_hidden_states[i].is_cuda:
+                    acc_hidden_states[i] = acc_hidden_states[i].cpu()
+        if acc_MLP_intermediate:
+            for i in range(len(acc_MLP_intermediate)):
+                if isinstance(acc_MLP_intermediate[i], torch.Tensor) and acc_MLP_intermediate[i].is_cuda:
+                    acc_MLP_intermediate[i] = acc_MLP_intermediate[i].cpu()
+        if acc_queries:
+            for i in range(len(acc_queries)):
+                if isinstance(acc_queries[i], torch.Tensor) and acc_queries[i].is_cuda:
+                    acc_queries[i] = acc_queries[i].cpu()
+        if acc_keys:
+            for i in range(len(acc_keys)):
+                if isinstance(acc_keys[i], torch.Tensor) and acc_keys[i].is_cuda:
+                    acc_keys[i] = acc_keys[i].cpu()
+        if acc_values:
+            for i in range(len(acc_values)):
+                if isinstance(acc_values[i], torch.Tensor) and acc_values[i].is_cuda:
+                    acc_values[i] = acc_values[i].cpu()
+        
+        # Debug: Print accumulator sizes
+        print(f"DEBUG: Accumulators - metrics: {len(acc_metrics)}, masks: {len(acc_attention_masks)}, hidden: {len(acc_hidden_states)}")
+        
+        # Clear GPU cache periodically to prevent memory fragmentation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # Force garbage collection
+            import gc
+            gc.collect()
 
         # # TODO: Remove this after testing
         # break
@@ -387,25 +444,18 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
     # Accuracy and F1 score
     metrics_df['highest_prob_token'] = metrics_df['predicted_output_tokens'].apply(lambda x: x[0])
     metrics_df['highest_prob_token_string'] = metrics_df.apply(lambda x: tokenizer.decode(x['predicted_output_tokens'][0]), axis=1)
-    metrics_df['highest_prob_token_empty_prompt'] = metrics_df['predicted_output_tokens_empty_prompt'].apply(lambda x: x[0])
-    metrics_df['highest_prob_token_string_empty_prompt'] = metrics_df.apply(lambda x: tokenizer.decode(x['predicted_output_tokens_empty_prompt'][0]), axis=1)
     
     if answer_field is not None:
         # Add constrained prediction columns
         metrics_df['highest_prob_token_constrained'] = metrics_df['predicted_output_tokens_constrained'].apply(lambda x: x[0] if x is not None else None)
-        metrics_df['highest_prob_token_empty_prompt_constrained'] = metrics_df['predicted_output_tokens_empty_prompt_constrained'].apply(lambda x: x[0] if x is not None else None)
         
         # Original unconstrained accuracies
         metrics_df.attrs['accuracy'] = accuracy_score(metrics_df['target_token'], metrics_df['highest_prob_token'])
-        metrics_df.attrs['accuracy_empty_prompt'] = accuracy_score(metrics_df['target_token'], metrics_df['highest_prob_token_empty_prompt'])
         metrics_df.attrs['f1_score'] = f1_score(metrics_df['target_token'], metrics_df['highest_prob_token'], average='weighted')
-        metrics_df.attrs['f1_score_empty_prompt'] = f1_score(metrics_df['target_token'], metrics_df['highest_prob_token_empty_prompt'], average='weighted')
         
         # New constrained accuracies
         metrics_df.attrs['accuracy_constrained'] = accuracy_score(metrics_df['target_token'], metrics_df['highest_prob_token_constrained'])
-        metrics_df.attrs['accuracy_empty_prompt_constrained'] = accuracy_score(metrics_df['target_token'], metrics_df['highest_prob_token_empty_prompt_constrained'])
         metrics_df.attrs['f1_score_constrained'] = f1_score(metrics_df['target_token'], metrics_df['highest_prob_token_constrained'], average='weighted')
-        metrics_df.attrs['f1_score_empty_prompt_constrained'] = f1_score(metrics_df['target_token'], metrics_df['highest_prob_token_empty_prompt_constrained'], average='weighted')
 
         # --- Calibration error
         label_mapping = list(metrics_df.scope_probs.iloc[0].keys())
@@ -421,11 +471,7 @@ def run_on_dataframe(dataframe, model, tokenizer, prompt_text_field, answer_fiel
         print(
             colored(f"Accuracy: {metrics_df.attrs['accuracy']:.2f}, F1 score: {metrics_df.attrs['f1_score']:.2f}, Expected calibration error: {metrics_df.attrs['expected_calibration_error']:.2f}", 'green'))
         print(
-            colored(f"Accuracy (empty prompt): {metrics_df.attrs['accuracy_empty_prompt']:.2f}, F1 score (empty prompt): {metrics_df.attrs['f1_score_empty_prompt']:.2f}", 'green'))
-        print(
             colored(f"Accuracy (constrained): {metrics_df.attrs['accuracy_constrained']:.2f}, F1 score (constrained): {metrics_df.attrs['f1_score_constrained']:.2f}", 'blue'))
-        print(
-            colored(f"Accuracy (empty prompt, constrained): {metrics_df.attrs['accuracy_empty_prompt_constrained']:.2f}, F1 score (empty prompt, constrained): {metrics_df.attrs['f1_score_empty_prompt_constrained']:.2f}", 'blue'))
 
     if not keep_KV_batched:
         if return_keys and return_values:

@@ -94,7 +94,7 @@ def plot_accuracy_curves(results_df):
     summary['ci'] = summary['std'] * stats.t.ppf((1 + 0.95) / 2, summary['count'] - 1) / np.sqrt(summary['count'])
     
     # Create plot
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(20, 8))
     sns.set_style("whitegrid")
     
     # Plot a line for each relabeling scheme
@@ -113,15 +113,16 @@ def plot_accuracy_curves(results_df):
                     capsize=3,  # Add horizontal caps to error bars
                     capthick=1)  # Make the caps slightly thicker
     
-    plt.xlabel('Number of Demonstrations')
+    plt.xscale('log')
+    plt.xlabel('Number of Demonstrations (log scale)')
     plt.ylabel('Accuracy')
-    plt.title('ICL Performance with Different Relabeling Schemes\n(with 95% confidence intervals)')
+    plt.title('ICL Performance with Different Relabeling Schemes\n(with 95% confidence intervals, log x-axis)')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
     # Save plot
-    plt.savefig('icl_accuracy_curves_new.png', dpi=300, bbox_inches='tight')
+    plt.savefig('icl_accuracy_curves_3classes_new_loglog.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_accuracy_curves_limited(results_df, max_demos=10):
@@ -155,15 +156,87 @@ def plot_accuracy_curves_limited(results_df, max_demos=10):
                     capsize=3,
                     capthick=1)
     
-    plt.xlabel('Number of Demonstrations')
+    plt.xscale('log')
+    plt.xlabel('Number of Demonstrations (log scale)')
     plt.ylabel('Accuracy')
-    plt.title(f'ICL Performance with Different Relabeling Schemes\n(up to {max_demos} demonstrations, with 95% confidence intervals)')
+    plt.title(f'ICL Performance with Different Relabeling Schemes\n(up to {max_demos} demonstrations, with 95% confidence intervals, log x-axis)')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
     # Save plot
-    plt.savefig('icl_accuracy_curves_limited_new.png', dpi=300, bbox_inches='tight')
+    plt.savefig('icl_accuracy_curves_3classes_limited_new_loglog.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_log_accuracy_curves(results_df):
+    """Create plot with log accuracy curves for different relabeling schemes"""
+    # Calculate mean accuracy for each n_demo and n_relabel
+    summary = results_df.groupby(['n_demo', 'n_relabel'])['accuracy'].agg(['mean']).reset_index()
+    
+    # Create plot
+    plt.figure(figsize=(20, 8))
+    sns.set_style("whitegrid")
+    
+    # Plot a line for each relabeling scheme
+    unique_relabels = sorted(summary['n_relabel'].unique())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_relabels)))
+    
+    for n_relabel, color in zip(unique_relabels, colors):
+        data = summary[summary['n_relabel'] == n_relabel]
+        plt.plot(data['n_demo'], np.log(data['mean']), 
+                label=f'Relabeling with {n_relabel} examples',
+                marker='o',
+                color=color,
+                alpha=0.8,
+                markersize=4)
+    
+    plt.xscale('log')
+    plt.xlabel('Number of Demonstrations (log scale)')
+    plt.ylabel('Log Accuracy')
+    plt.title('ICL Performance with Different Relabeling Schemes\n(Log-Log Scale)')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    # Save plot
+    plt.savefig('icl_log_accuracy_curves_3classes_new_loglog.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_log_accuracy_curves_limited(results_df, max_demos=10):
+    """Create plot with log accuracy curves for different relabeling schemes, limited to specified max demonstrations"""
+    # Filter data for demos <= max_demos
+    results_df_limited = results_df[results_df['n_demo'] <= max_demos].copy()
+    
+    # Calculate mean accuracy for each n_demo and n_relabel
+    summary = results_df_limited.groupby(['n_demo', 'n_relabel'])['accuracy'].agg(['mean']).reset_index()
+    
+    # Create plot
+    plt.figure(figsize=(12, 8))
+    sns.set_style("whitegrid")
+    
+    # Plot a line for each relabeling scheme
+    unique_relabels = sorted(summary['n_relabel'].unique())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_relabels)))
+    
+    for n_relabel, color in zip(unique_relabels, colors):
+        data = summary[summary['n_relabel'] == n_relabel]
+        plt.plot(data['n_demo'], np.log(data['mean']), 
+                label=f'Relabeling with {n_relabel} examples',
+                marker='o',
+                color=color,
+                alpha=0.8,
+                markersize=4)
+    
+    plt.xscale('log')
+    plt.xlabel('Number of Demonstrations (log scale)')
+    plt.ylabel('Log Accuracy')
+    plt.title(f'ICL Performance with Different Relabeling Schemes\n(up to {max_demos} demonstrations, Log-Log Scale)')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # Save plot
+    plt.savefig('icl_log_accuracy_curves_3classes_limited_new_loglog.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def print_detailed_stats(results_df):
@@ -214,10 +287,15 @@ def main():
     # plot_accuracy_curves(results_df)
     # print("Full plot saved as icl_accuracy_curves2.png")
     
-    plot_accuracy_curves(results_df)
-    print("Full plot saved as icl_accuracy_curves_new.png")
-    plot_accuracy_curves_limited(results_df, max_demos=10)
-    print("Limited plot (up to 10 demonstrations) saved as icl_accuracy_curves2_limited_new.png")
+    # plot_accuracy_curves(results_df)
+    # print("Full plot saved as icl_accuracy_curves_3classes_new.png")
+    # plot_accuracy_curves_limited(results_df, max_demos=10)
+    # print("Limited plot (up to 10 demonstrations) saved as icl_accuracy_curves_limited_new.png")
+    
+    plot_log_accuracy_curves(results_df)
+    print("Full log accuracy plot saved as icl_log_accuracy_curves_3classes_new.png")
+    plot_log_accuracy_curves_limited(results_df, max_demos=10)
+    print("Limited log accuracy plot (up to 10 demonstrations) saved as icl_log_accuracy_curves_limited_new.png")
 
 if __name__ == "__main__":
     main() 

@@ -4,6 +4,12 @@ from LLMGeometry import load_model_and_tokenizer
 from LLMGeometry.evaluation import run_on_dataframe
 from LLMGeometry.utils import generate_random_samples, save_file_with_incremental_suffix
 import torch
+import os
+
+# Set memory management environment variables BEFORE importing torch
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # For debugging
+
 import pandas as pd
 import pickle
 from termcolor import colored
@@ -87,72 +93,40 @@ def create_template(train_df, prefix_type, n_examples, keyword, answer_field, da
     suffix = f'\n{keyword}:'
     return prefix, suffix, chosen_sentences, chosen_labels
 
-def W_ICL(top_k_tokens, sentences, labels, sentence_probs):
-    W = {}
-    for class_label in labels.unique(): # C 
-        W[class_label] = {}
-        for i, token in enumerate(top_k_tokens): # V  
-            W[class_label][token] = 0
-
-    not_zero = 0
-    total = 0
-    for class_label in labels.unique(): # C
-        for i, token in enumerate(top_k_tokens): # V
-            sum = 0
-            for sentence, label in zip(sentences, labels): # N
-                prob = sentence_probs[sentence][i]
-                log_prob = torch.log(prob)
-                # one_minus_log_prob = torch.log(1 - prob)
-                one_minus_log_prob = -log_prob
-                if label == class_label:
-                    sum += log_prob
-                else:
-                    sum += one_minus_log_prob
-                    total += 1
-                    if one_minus_log_prob != 0:
-                        not_zero += 1
-            W[class_label][token] = sum.item()
-    print("not_zero: ", not_zero, "total: ", total)
-    return W
-
-def reassign_labels(all_tokens_str, labels, sentences, sentence_probs, tokenizer):
-    num_to_label = {}
-    num_to_class = {}
-    W = W_ICL(all_tokens_str, sentences, labels, sentence_probs)
-    weights = []
-    
-    for (i, v1) in enumerate(W):
-        num_to_class[i] = v1
-        for (j, v2) in enumerate(W[v1]):
-            num_to_label[j] = v2
-
-    weights = []
-    for (i, v1) in enumerate(W):
-        weights.append([])
-        for (j, v2) in enumerate(W[v1]):
-            weights[i].append(W[v1][v2])
-    cost = np.array(weights)
-
-    row_ind, col_ind = linear_sum_assignment(cost, maximize=True)
-
-    new_labels = {}
-    for i in range(len(row_ind)):
-        token_str = num_to_label[col_ind[i]]
-        token_id = tokenizer.convert_tokens_to_ids(token_str)
-        
-        print(f"Class: {num_to_class[row_ind[i]]}")
-        print(f"  Token string: '{token_str}'")
-        print(f"  Token ID: {token_id}")
-        print(f"  Back to string: '{tokenizer.convert_ids_to_tokens(token_id)}'")
-        
-        new_labels[num_to_class[row_ind[i]]] = (token_str, token_id)
-    print("new_labels: ", new_labels)
-    print("sum of cost: ", cost[row_ind, col_ind].sum())
-    return new_labels
 
 def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relabel, keyword, answer_field, N_RUNS=50, 
          root_folder="DATA/ICL_stability/results", ensemble_assignment=False, ensemble_method='voting', 
          ensemble_temperature=1.0, top_tokens=-1, whole_words_only=False, base_seed=42):
+    
+    # Check CUDA availability and initialize
+    if torch.cuda.is_available():
+        torch.cuda.init()
+        print(f"CUDA initialized. Using device: {torch.cuda.current_device()}")
+        print(f"Device name: {torch.cuda.get_device_name()}")
+        print(f"Memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"Memory cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+    
+    # Aggressive memory cleanup to handle fragmentation
+    if torch.cuda.is_available():
+        print(f"GPU device: {torch.cuda.get_device_name()}")
+        print(f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"Reserved memory before cleanup: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"Allocated memory before cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        
+        # Force garbage collection and empty cache multiple times
+        import gc
+        for i in range(3):
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Reset all memory stats
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_max_memory_allocated()
+        
+        print(f"Reserved memory after cleanup: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"Allocated memory after cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print("Completed aggressive memory cleanup")
     
     # Set a base seed that will be used to generate per-run seeds
     np.random.seed(base_seed)
@@ -162,7 +136,19 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     root_folder = Path(root_folder)
 
     # --- Loading the model
+    print("Loading model...")
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    print(f"Model loaded. GPU memory after loading: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    
+    # Enable gradient checkpointing to save memory
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+        print("Gradient checkpointing enabled for memory optimization")
+    
+    # Clear any existing CUDA cache
+    torch.cuda.empty_cache()
+    print(f"GPU memory after clearing cache: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    
     vocab = tokenizer.get_vocab()
     sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
 
@@ -176,9 +162,18 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     if top_tokens in token_sizes:
         # Load precomputed data for specific token size
         file_suffix = '_whole_words' if whole_words_only else ''
-        with open(f'sentence_info/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+        
+        # Determine the correct directory based on model name
+        if MODEL_NAME == 'llama3.1_1b_base':
+            info_dir = '1B_sentence_info'
+        elif MODEL_NAME == 'llama3.1_70b_instruct':
+            info_dir = '70B_sentence_info'
+        else:
+            info_dir = '7B_sentence_info'  # Default fallback
+            
+        with open(f'{info_dir}/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
             sentence_probs = pickle.load(f)
-        with open(f'sentence_info/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+        with open(f'{info_dir}/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
             sentence_logits = pickle.load(f)
         tokens = top_tokens_dict[top_tokens]
         all_tokens = [token[1] for token in tokens]  # Get token IDs
@@ -188,6 +183,7 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     datasets = load_dataset_by_name(DATASET_NAME)
     train_df = datasets['train']
     test_df = datasets['test']
+    
     
     # Split training data in half
     relabeling_df = train_df.sample(frac=0.5, random_state=base_seed)
@@ -240,8 +236,18 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     n_existing_runs = len(list(folder_with_runs.glob("run_*"))) # Number of existing runs
 
     # Load precomputed relabeling
-    # relabeling_path = Path(f"relabelings/relabelings_{n_relabel}examples_1runs.pkl")
-    relabeling_path = Path(f"relabelings/relabelings_10000toptokens_isensembledTrue_voting_{n_relabel}examples_1runs.pkl")
+    # Determine the correct directory based on model name
+    if MODEL_NAME == 'llama3.1_1b_base':
+        relabeling_dir = '1B_relabelings'
+        relabeling_prefix = '1B'
+    elif MODEL_NAME == 'llama3.1_70b_instruct':
+        relabeling_dir = '70B_relabelings'
+        relabeling_prefix = '70B'
+    else:
+        relabeling_dir = '7B_relabelings'  # Default fallback
+        relabeling_prefix = '7B'
+        
+    relabeling_path = Path(f"{relabeling_dir}/{relabeling_prefix}_relabelings_{num_classes}classes_128256toptokens_isensembledFalse_voting_{n_relabel}examples_1runs.pkl")
     if not relabeling_path.exists():
         raise ValueError(f"No relabeling file found for n_relabel={n_relabel}. Please run generate_relabelings.py first.")
     
@@ -299,10 +305,14 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         # print("test_df['token_relabel_str']: ", test_df['token_relabel_str'])
         # print("test_df['token_relabel_id']: ", test_df['token_relabel_id'])
 
+        # Use smaller batch size for 70B model to avoid OOM
+        batch_size = 2 if MODEL_NAME == 'llama3.1_70b_instruct' else 10
+        # batch_size = 5  # Still causes OOM at logits layer
+        
         output = run_on_dataframe(test_df, model, tokenizer, 'text_with_suffix', answer_field='token_relabel_id', 
-                         return_hidden_states=True, batch_size=10,
+                         return_hidden_states=False, batch_size=batch_size,
                          prefix_tokens=prefix_tokens,  # Use prefix_tokens instead of prefix_text
-                         return_raw_batches=True, new_labels=new_labels)
+                         return_raw_batches=False, new_labels=new_labels)
         # output_gold = run_on_dataframe(test_df, model, tokenizer, 'text_with_suffix_gold', answer_field='gold_label_id', 
         #                          return_hidden_states=True, batch_size=10,
         #                          prefix_tokens=prefix_tokens_gold,  # Use prefix_tokens instead of prefix_text
@@ -349,10 +359,28 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
 
         save_outputs(output, save_folder_output, CONFIG)
         print(colored(f"Results saved to {save_folder_output}", 'green'))
+        
+        # Print memory stats
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"GPU memory after cleanup - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+  
+        torch.cuda.empty_cache()
+        print(f"GPU memory after run {k+1}: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         # save_outputs(output_gold, save_folder_gold, CONFIG)
         # print(colored(f"Results saved to {save_folder_gold}", 'green'))
 
 
+
+def cleanup_gpu():
+    """Force cleanup of GPU memory"""
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    print("Forced GPU memory cleanup")
 
 def main_SLURM():
     # Using this function to run the script with SLURM 
@@ -415,9 +443,9 @@ if __name__ == "__main__":
         
     else:
         # Command line mode
-        parser.add_argument("--model", default="llama3.1_base", help="Model name")
+        parser.add_argument("--model", default="llama3.1_70b_instruct", help="Model name")
         parser.add_argument("--dataset", default="claude_multitask", help="Dataset name")
-        parser.add_argument("--num_classes", type=int, default=3, help="Number of classes")
+        parser.add_argument("--num_classes", type=int, default=5, help="Number of classes")
         parser.add_argument("--prefix_type", default="demos", help="Prefix type")
         parser.add_argument("--n_examples", type=int, required=True, help="Number of examples in context")
         parser.add_argument("--n_relabel", type=int, required=True, help="Number of examples used for relabeling")
@@ -454,3 +482,4 @@ if __name__ == "__main__":
             'base_seed': args.seed
         }
         main(**config)
+        cleanup_gpu()

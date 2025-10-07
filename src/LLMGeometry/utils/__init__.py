@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 import h5py
 import pickle
-from transformers.cache_utils import HybridCache
+from transformers.cache_utils import HybridCache, DynamicCache
 
 
 def create_attention_mask_from_sequence_lengths(seq_lengths):
@@ -79,12 +79,27 @@ def take_last_from_attention_mask(X, attention_mask, offset=0):
 
 def expand_KV(past_key_values, batch_size):
     '''
-        Expand the past key-values to the specified batch size (when passed a tuple of tensors).
+        Expand the past key-values to the specified batch size.
     '''
     if past_key_values is None:  # Handle None (empty prefix) case
         return None
-    if isinstance(past_key_values, HybridCache): # If past_key_values is a HybridCache object, we return it as is
+    
+    if isinstance(past_key_values, HybridCache): 
+        # HybridCache handles batch expansion internally
         return past_key_values
+    
+    if isinstance(past_key_values, DynamicCache):
+        # For DynamicCache, we need to expand each tensor but create a new cache to avoid in-place modification
+        expanded_cache = DynamicCache()
+        for layer_idx in range(len(past_key_values.layers)):
+            if past_key_values.layers[layer_idx].keys is not None:
+                expanded_key = past_key_values.layers[layer_idx].keys.expand(batch_size, -1, -1, -1).clone()
+                expanded_value = past_key_values.layers[layer_idx].values.expand(batch_size, -1, -1, -1).clone()
+                # Use the update method to properly add to the cache
+                expanded_cache.update(expanded_key, expanded_value, layer_idx)
+        return expanded_cache
+    
+    # Legacy tuple format
     return [[x.expand(batch_size, -1, -1, -1) for x in past_key_values[n_layer]] for n_layer in range(len(past_key_values))]
 
 

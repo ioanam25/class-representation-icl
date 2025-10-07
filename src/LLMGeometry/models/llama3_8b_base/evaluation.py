@@ -171,7 +171,7 @@ class ActivationsHookLlama3:
         self.activations: List[Dict[str, Any]] = []
         self.num_key_value_heads = model.config.num_key_value_heads
         self.num_key_value_groups = model.model.layers[0].self_attn.num_key_value_groups
-        self.num_heads = model.model.layers[0].self_attn.num_heads
+        self.num_heads = model.config.num_attention_heads  # Changed to use config instead of layer attribute
         self.head_dim = model.model.layers[0].self_attn.head_dim
         self.add_positional_encodings = add_positional_encodings
         self._register_hooks()
