@@ -1,20 +1,42 @@
-# The Geometry of Prompting: Unveiling Distinct Mechanisms of Task Adaptation in Language Models
+# On the Relationship Between the Choice of Representation and In-Context Learning
 
+This repository contains the code and data for the paper "On the Relationship Between the Choice of Representation and In-Context Learning".
 
-This repository contains the code and data for the paper ["The Geometry of Prompting: Unveiling Distinct Mechanisms of Task Adaptation in Language Models"](https://arxiv.org/abs/2502.08009)
+![Cover Image](fig1v2.pdf)
 
+## Description
 
-![cover](repo_cover.png)
+This project investigates how different sets of labels or "class representations" impact the performance of models during in-context learning (ICL) with large language models. 
 
-## Repo Structure
+The workflow is designed to:
+- Pre-calculate token probabilities for a given dataset
+- Generate multiple sets of labels (relabelings) for the classes  
+- Run ICL experiments using these different label sets to evaluate performance
 
-- `datasets` : Scripts to create processed datasets and pickle files for the datasets used in the paper.
-- `experiments` : Sscripts to run the experiments and generate the results.
-    - `run_ICL.py` : Runs the in-context learning on a specified dataset and model, extracts token embeddings and saves them to a pickle file on disk.
-    - `run_prompt_tuning.py` : Runs the prompt tuning on a specified dataset and model, extracts token embeddings across training iterations and saves them to a pickle file on disk.
-    - `compute_capacity.py` : Computes manifold capacity and other metrics for the token embeddings extracted from the in-context learning and prompt tuning runs.
-    - `prompt_tuning_analysis.ipynb` : Jupyter notebook to visualize the results of the prompt tuning runs.
-    - `stability_analysis.ipynb` : Jupyter notebook to create Figure 6 in the paper
-- `plots` : Scripts to load results across runs and create the plots for the paper.
-- `src` : Main source code for the project package (`LLM_Geometry`), which should be installed in the environment. This includes the model wrappers, data loaders, and other utilities.
+## Workflow and Usage
 
+The main workflow consists of three steps. Ensure you run them in the specified order:
+
+### 1. Precompute Weights
+
+First, use `precompute_weights.py` to process your dataset and calculate the next token probabilities for each sentence. This step is necessary to prepare the data for the subsequent experiments.
+
+```bash
+python precompute_weights.py
+```
+
+### 2. Generate Relabelings
+
+Next, run `generate_relabelings.py` to create different sets of class labels based on the original dataset. These new label sets will be used to test the model's ICL capabilities.
+
+```bash
+python experiments/generate_relabelings.py
+```
+
+### 3. Run In-Context Learning Experiments
+
+Finally, use `run_icl_relabel.py` to execute the in-context learning experiments using the precomputed weights and the newly generated label sets. This script will evaluate and output the performance of the model under different labeling schemes.
+
+```bash
+python experiments/run_icl_relabel.py
+```
