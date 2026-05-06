@@ -57,3 +57,5 @@ learning_curves/
 logs/
 logits/
 relabelings/
+experiments/configs/
+experiments/run_scripts/
