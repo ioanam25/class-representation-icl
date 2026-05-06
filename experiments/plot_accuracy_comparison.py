@@ -246,9 +246,9 @@ def plot_accuracy_curves_comparison(results_dfs, model_names, num_classes, smoot
     # Save plot
     suffix = "_smoothed" if smooth else ""
     suffix += "_limited40" if limited_to_40_demos else ""
-    plt.savefig(f'plots_comparison/accuracy_curves_subplots_{num_classes}classes{suffix}.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(f'plots/plots_comparison/accuracy_curves_subplots_{num_classes}classes{suffix}.pdf', dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Subplot comparison plot saved as plots_comparison/accuracy_curves_subplots_{num_classes}classes{suffix}.pdf")
+    print(f"Subplot comparison plot saved as plots/plots_comparison/accuracy_curves_subplots_{num_classes}classes{suffix}.pdf")
 
 def main():
     # Path to consolidated CSV files
@@ -256,19 +256,19 @@ def main():
     num_classes = 5
     
     if num_classes == 3:
-        csv_path_1b = "learning_curves_relabel_demos_3classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv"
-        csv_path_7b = "learning_curves_relabel_demos_3classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv"
-        csv_path_70b = "learning_curves_relabel_demos_3classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
+        csv_path_1b = "learning_curves/learning_curves_relabel_demos_3classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv"
+        csv_path_7b = "learning_curves/learning_curves_relabel_demos_3classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv"
+        csv_path_70b = "learning_curves/learning_curves_relabel_demos_3classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
     elif num_classes == 5:
-        csv_path_1b = "learning_curves_relabel_demos_5classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv"
-        csv_path_7b = "learning_curves_relabel_demos_5classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv"
-        csv_path_70b = "learning_curves_relabel_demos_5classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
+        csv_path_1b = "learning_curves/learning_curves_relabel_demos_5classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv"
+        csv_path_7b = "learning_curves/learning_curves_relabel_demos_5classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv"
+        csv_path_70b = "learning_curves/learning_curves_relabel_demos_5classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
     else:
         raise ValueError(f"Invalid number of classes: {num_classes}")
     
     # Create plots directory if it doesn't exist
     import os
-    os.makedirs('plots_comparison', exist_ok=True)
+    os.makedirs('plots/plots_comparison', exist_ok=True)
     
     try:
         # Load data for all models

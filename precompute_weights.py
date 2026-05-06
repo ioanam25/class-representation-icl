@@ -15,12 +15,12 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score
 import glob
 
-MODEL_NAME = 'llama3.1_70b_instruct'
-DATASET_NAME = 'claude_multitask'
+MODEL_NAME = 'mistral_7b_base'
+DATASET_NAME = 'TREC_coarse'
 prefix_type = 'demos'
 n_examples = 5
 keyword = 'Category'
-answer_field = 'emotion_letter'
+answer_field = 'label'
 N_RUNS = 50
 root_folder = "temp/ICL_results"
 
@@ -42,55 +42,6 @@ top_2000_tokens = sorted_vocab[:2000]
 top_1000_tokens = sorted_vocab[:1000]
 top_100_tokens = sorted_vocab[:100]
 top_10_tokens = sorted_vocab[:10]
-
-def create_template(prefix_type, n_examples, keyword, answer_field, dataset_name, shuffle_labels=False, seed=None):
-    '''
-        Create a template for the ICL prompt.
-        
-        Parameters:
-        ----------
-        prefix_type: str
-            The type of the prefix. Can be 'raw', 'instruction', 'demos'.
-        n_examples: int
-            The number of examples to include in the prefix.
-        keyword: str
-            The keyword to be used in the template.
-        answer_field: str
-            The name of the answer field.
-        dataset_name: str
-            The name of the dataset.
-        shuffle_labels: bool
-            Whether to shuffle the labels.
-        seed: int
-            The seed for the random number generator.
-        
-        Returns:
-        -------
-        prefix: str
-            The prefix of the ICL prompt.
-        suffix: str
-            The suffix of the ICL prompt
-    '''
-    ds = load_dataset_by_name(dataset_name)
-    train_df = ds['train']
-    category_list = train_df[answer_field].unique()
-    # --- Creating the prefix 
-    if prefix_type == 'raw':
-        prefix = ''
-    elif prefix_type=='instruction':
-        prefix = 'This is a text classification task. Possible categories are: ' + ', '.join(category_list) + '.\n'
-    elif prefix_type == 'demos':
-        chosen_indices = generate_random_samples(train_df[answer_field], n_examples, seed=seed)
-        chosen_sentences = train_df.loc[chosen_indices,'text']
-        chosen_labels = train_df.loc[chosen_indices, answer_field]
-        if shuffle_labels:
-            chosen_labels = chosen_labels.sample(frac=1).reset_index(drop=True) # Shuffle the labels
-        prefix = ''
-        for sentence, label in zip(chosen_sentences, chosen_labels):
-            prefix += 'Text: ' + sentence + f'\n{keyword}: ' + label + '\n'
-    # --- Creating the suffix
-    suffix = f'\n{keyword}:'
-    return prefix, suffix, chosen_sentences, chosen_labels
 
 def forward_pass(model, tokenizer, sentence):
     # print(sentence)
@@ -132,7 +83,10 @@ def get_filtered_tokens(vocab, k=None, whole_words_only=False):
     
     if whole_words_only:
         # Filter for tokens starting with 'Ġ'
-        sorted_vocab = [(token, idx) for token, idx in sorted_vocab if token.startswith('Ġ')]
+        if MODEL_NAME == 'mistral_7b_base':
+            sorted_vocab = [(token, idx) for token, idx in sorted_vocab if token.startswith('▁')]
+        else:
+            sorted_vocab = [(token, idx) for token, idx in sorted_vocab if token.startswith('Ġ')]
     
     if k is not None:
         # Only slice if k is smaller than the list size
@@ -176,27 +130,41 @@ def precompute_W_forward_pass(sentences, top_k_tokens=None, whole_words_only=Fal
         if isinstance(top_k_tokens[0], tuple):
             # Convert from (token, id) tuples to just ids
             token_indices = [token[1] for token in top_k_tokens]
+            print("is instance of tuple: ", len(token_indices))
         else:
             # Already have token ids
             token_indices = top_k_tokens
             
         if whole_words_only:
             # Filter for whole words if needed
-            token_strs = [tokenizer.decode([t]) for t in token_indices]
-            token_indices = [t for i, t in enumerate(token_indices) if token_strs[i].startswith('Ġ')]
+            token_strs = tokenizer.convert_ids_to_tokens(token_indices) #[tokenizer.decode([t]) for t in token_indices]
+            # print("token strs: ", token_strs)
+            # print("token strs starts with Ġ: ", [token_strs[i].startswith('Ġ') for i in range(len(token_strs))])
+            if MODEL_NAME == 'mistral_7b_base':
+                token_indices = [t for i, t in enumerate(token_indices) if token_strs[i].startswith('▁')]
+            else:
+                token_indices = [t for i, t in enumerate(token_indices) if token_strs[i].startswith('Ġ')]
+            print("after filtering for whole words: ", len(token_indices))
     else:
         # Using all tokens
         if whole_words_only:
             # Get indices of all whole word tokens
-            token_indices = [idx for token, idx in vocab.items() if token.startswith('Ġ')]
+            if MODEL_NAME == 'mistral_7b_base':
+                token_indices = [idx for token, idx in vocab.items() if token.startswith('▁')]
+            else:
+                token_indices = [idx for token, idx in vocab.items() if token.startswith('Ġ')]
         else:
             # Use all token indices
             token_indices = list(range(len(vocab)))
     
+    # print(token_indices)
     print(f"Using {len(token_indices)} tokens for computation")
     
     for i, sentence in enumerate(sentences):
-        template_sentence = 'Text: ' + sentence + '\n' + 'Category: '
+        if MODEL_NAME == 'mistral_7b_base':
+            template_sentence = 'Text: ' + sentence + '\n' + 'Category:'
+        else:
+            template_sentence = 'Text: ' + sentence + '\n' + 'Category: '
         print(f"Processing sentence {i+1} of {len(sentences)}: " + template_sentence)
         
         # Get probabilities (already on CPU from forward_pass)
@@ -230,12 +198,13 @@ if __name__ == '__main__':
         # Compute for top 4000 whole words
         sentence_probs, sentence_logits = precompute_W_forward_pass(
             sentences, 
-            top_k_tokens=top_k_tokens[10000],
+            top_k_tokens=top_k_tokens[128256],
             whole_words_only=True
         )
         
+        Path(f'{MODEL_NAME}_{DATASET_NAME}').mkdir(parents=True, exist_ok=True)
         # Save results
-        with open('70B_sentence_info/template_sentence_probs_10000_whole_words.pkl', 'wb') as f:
+        with open(f'{MODEL_NAME}_{DATASET_NAME}/template_sentence_probs_128256_whole_words.pkl', 'wb') as f:
             pickle.dump(sentence_probs, f)
-        with open('70B_sentence_info/template_sentence_logits_10000_whole_words.pkl', 'wb') as f:
+        with open(f'{MODEL_NAME}_{DATASET_NAME}/template_sentence_logits_128256_whole_words.pkl', 'wb') as f:
             pickle.dump(sentence_logits, f)

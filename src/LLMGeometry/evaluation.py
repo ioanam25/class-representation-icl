@@ -3,11 +3,22 @@ import LLMGeometry.models.llama3_1b_base.evaluation
 import LLMGeometry.models.llama3_70b_instruct.evaluation
 import LLMGeometry.models.gemma2_2b_base.evaluation
 import LLMGeometry.models.mistral_7b_base.evaluation
+import LLMGeometry.models.qwen2_7b_base.evaluation
 from LLMGeometry.preprocessing import prepare_batch, DataFrameDataset
 from LLMGeometry.postprocessing import get_token_probability, get_predictions_from_logits
 from LLMGeometry.utils import take_last_from_attention_mask, create_causal_mask, expand_KV
 
-from transformers.cache_utils import HybridCache
+try:
+    from transformers.cache_utils import HybridCache, DynamicCache
+except ImportError:
+    # HybridCache might not be available in older transformers versions
+    try:
+        from transformers.cache_utils import DynamicCache
+        HybridCache = None
+    except ImportError:
+        # Very old versions might not have either
+        HybridCache = None
+        DynamicCache = None
 import math
 import pandas as pd
 import torch.nn as nn
@@ -73,6 +84,8 @@ def hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=None
         return LLMGeometry.models.gemma2_2b_base.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
     if model.name_or_path == 'mistralai/Mistral-7B-v0.3':
         return LLMGeometry.models.mistral_7b_base.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
+    if model.name_or_path == 'Qwen/Qwen2.5-7B':
+        return LLMGeometry.models.qwen2_7b_base.evaluation.hooked_forward_pass(model, input_embeds, attention_mask, correct_labels=correct_labels, **kwargs)
     else:
         raise ValueError(f"Model {model.name_or_path} not supported.")
 
@@ -140,6 +153,8 @@ def cache_prefix_text(model, tokenizer, prefix_text=None, prefix_tokens=None):
 
     if model.name_or_path == 'google/gemma-2-2b':
         # Since Gemma uses sliding window attention, caching is done with HybridCache, rather than tuple of tensors
+        if HybridCache is None:
+            raise ImportError("HybridCache is not available in this version of transformers. Please upgrade transformers to use Gemma models.")
         kv_cache = HybridCache(config=model.config, max_batch_size=1, max_cache_len=prefix_seq_len + 100, device="cuda", dtype=torch.bfloat16)
         with torch.no_grad():
             model(inputs_embeds = batch_prefix['input_embeds'], attention_mask = batch_prefix['attention_mask'], use_cache=True, past_key_values=kv_cache)

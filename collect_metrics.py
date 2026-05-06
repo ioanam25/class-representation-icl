@@ -6,9 +6,11 @@ Script to collect all metrics from distributed pickle files and consolidate into
 import os
 import pickle
 import pandas as pd
+import numpy as np
 import re
 from pathlib import Path
 import sys
+from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 
 def examine_pickle_structure(pickle_path):
     """Examine the structure of a single pickle file to understand the data format."""
@@ -157,6 +159,86 @@ def check_missing_pickles(base_dir, ignore_relabel40=False):
     
     return folders_without_pickles, missing_files_details
 
+def compute_per_class_metrics(df):
+    """
+    Compute per-class F1, precision, recall, and macro F1 from a metrics DataFrame.
+    
+    The DataFrame should have 'target_token' (ground truth token IDs) and 
+    'highest_prob_token_constrained' (predicted token IDs, constrained to valid classes).
+    
+    Returns a dict with:
+      - f1_macro_constrained: macro-averaged F1 (all classes weighted equally)
+      - f1_per_class_constrained: dict mapping token_id -> F1
+      - precision_per_class_constrained: dict mapping token_id -> precision
+      - recall_per_class_constrained: dict mapping token_id -> recall
+      - class_token_ids: sorted list of unique class token IDs
+    """
+    result = {}
+    
+    if 'target_token' not in df.columns or 'highest_prob_token_constrained' not in df.columns:
+        return result
+    
+    y_true = df['target_token'].values
+    y_pred = df['highest_prob_token_constrained'].values
+    
+    # Skip if any None/NaN values in predictions
+    valid_mask = pd.notna(y_pred)
+    if not valid_mask.all():
+        y_true = y_true[valid_mask]
+        y_pred = y_pred[valid_mask]
+    
+    if len(y_true) == 0:
+        return result
+    
+    # Get sorted unique class labels (from ground truth to ensure all classes are represented)
+    unique_labels = sorted(np.unique(y_true))
+    
+    # Macro F1 (all classes weighted equally - best single metric for imbalanced)
+    result['f1_macro_constrained'] = f1_score(y_true, y_pred, average='macro', labels=unique_labels, zero_division=0)
+    
+    # Per-class F1, precision, recall
+    f1_per = f1_score(y_true, y_pred, average=None, labels=unique_labels, zero_division=0)
+    prec_per = precision_score(y_true, y_pred, average=None, labels=unique_labels, zero_division=0)
+    rec_per = recall_score(y_true, y_pred, average=None, labels=unique_labels, zero_division=0)
+    
+    for i, token_id in enumerate(unique_labels):
+        token_id_int = int(token_id)
+        result[f'f1_class_{token_id_int}'] = f1_per[i]
+        result[f'precision_class_{token_id_int}'] = prec_per[i]
+        result[f'recall_class_{token_id_int}'] = rec_per[i]
+    
+    # Also store the class token IDs for reference
+    result['class_token_ids'] = str([int(x) for x in unique_labels])
+    
+    # Try to add human-readable class names if emotion_letter is available
+    # emotion_letter maps: A=Joy, B=Sadness, C=Anger, D=Fear, E=Surprise
+    emotion_map = {'A': 'Joy', 'B': 'Sadness', 'C': 'Anger', 'D': 'Fear', 'E': 'Surprise'}
+    if 'emotion_letter' in df.columns and 'token_relabel_id' in df.columns:
+        # Build token_id -> emotion name mapping from the data
+        try:
+            token_to_emotion = {}
+            for _, row in df[['emotion_letter', 'token_relabel_id']].drop_duplicates().iterrows():
+                letter = str(row['emotion_letter']).strip()
+                # Handle Mistral (no leading space) vs Llama (leading space " A")
+                if letter.startswith(' '):
+                    letter = letter.strip()
+                emotion_name = emotion_map.get(letter, letter)
+                token_to_emotion[int(row['token_relabel_id'])] = emotion_name
+            
+            for token_id in unique_labels:
+                token_id_int = int(token_id)
+                if token_id_int in token_to_emotion:
+                    emo = token_to_emotion[token_id_int]
+                    idx = unique_labels.tolist().index(token_id)
+                    result[f'f1_{emo}'] = f1_per[idx]
+                    result[f'precision_{emo}'] = prec_per[idx]
+                    result[f'recall_{emo}'] = rec_per[idx]
+        except Exception:
+            pass  # If mapping fails, we still have the token_id-based columns
+    
+    return result
+
+
 def collect_all_metrics(base_dir, ignore_relabel40=False):
     """Collect all metrics from all pickle files in the directory structure."""
     base_path = Path(base_dir)
@@ -214,6 +296,10 @@ def collect_all_metrics(base_dir, ignore_relabel40=False):
                     if hasattr(df, 'attrs'):
                         record.update(df.attrs)
                     
+                    # --- Per-class metrics (F1, precision, recall) ---
+                    per_class = compute_per_class_metrics(df)
+                    record.update(per_class)
+                    
                     # Add config information
                     if isinstance(config, dict):
                         for key, value in config.items():
@@ -261,8 +347,22 @@ def collect_all_metrics(base_dir, ignore_relabel40=False):
     return all_data
 
 def main():
-    ignore_relabel40 = False
-    base_dir = "/gpfs/data/oermannlab/users/im2178/class-representation-icl/learning_curves_relabel_demos_5classes_70b/claude_multitask/llama3.1_70b_instruct"
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Collect metrics from distributed pickle files.')
+    parser.add_argument('--base_dir', type=str, 
+                        default="/gpfs/data/oermannlab/users/im2178/class-representation-icl/learning_curves/learning_curves_relabel_demos_3classes_70b/claude_multitask/llama3.1_70b_instruct",
+                        help='Base directory containing the experiment results')
+    parser.add_argument('--ignore_relabel40', action='store_true',
+                        help='Ignore relabel40 configurations')
+    
+    args = parser.parse_args()
+    
+    base_dir = args.base_dir
+    ignore_relabel40 = args.ignore_relabel40
+    
+    print(f"Processing directory: {base_dir}")
+    print(f"Ignore relabel40: {ignore_relabel40}")
     
     # Check for missing pickle files first
     missing_folders, missing_files_details = check_missing_pickles(base_dir, ignore_relabel40)

@@ -122,7 +122,7 @@ def plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=Fals
             frozenset([60, 70]): 70,    # Use color of 70
             frozenset([80, 90]): 90     # Use color of 90
         }
-    elif model_name == '70B':
+    elif model_name == '70B' or model_name == 'llama3.1_70b_instruct':
         identical_curves = {
             frozenset([40]): 50,        # Use color of 50
             frozenset([70]): 100  # Use color of 100
@@ -229,38 +229,30 @@ def plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=Fals
     print(f"Single model plot saved as {plot_filename}")
 
 def main():
-    # Configuration
-    num_classes = 5
-    model_size = '1b'  # Change this to '1b', '8b', or '70b'
+    import argparse
     
-    # Define paths based on model size and num_classes
-    if num_classes == 3:
-        csv_paths = {
-            '1b': "learning_curves_relabel_demos_3classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv",
-            '8b': "learning_curves_relabel_demos_3classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv",
-            '70b': "learning_curves_relabel_demos_3classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
-        }
-    elif num_classes == 5:
-        csv_paths = {
-            '1b': "learning_curves_relabel_demos_5classes_1b/claude_multitask/llama3.1_1b_base/consolidated_metrics.csv",
-            '8b': "learning_curves_relabel_demos_5classes_8b/claude_multitask/llama3.1_base/consolidated_metrics.csv",
-            '70b': "learning_curves_relabel_demos_5classes_70b/claude_multitask/llama3.1_70b_instruct/consolidated_metrics.csv"
-        }
-    else:
-        raise ValueError(f"Invalid number of classes: {num_classes}")
+    parser = argparse.ArgumentParser(description='Plot accuracy curves from consolidated metrics.')
+    parser.add_argument('--csv_path', type=str, required=True,
+                        help='Path to the consolidated_metrics.csv file')
+    parser.add_argument('--model_name', type=str, required=True,
+                        help='Model name for plot title (e.g., "1B", "8B", "70B")')
+    parser.add_argument('--num_classes', type=int, required=True,
+                        help='Number of classes (3 or 5)')
+    parser.add_argument('--output_dir', type=str, default='plots_single',
+                        help='Output directory for plots')
     
-    if model_size not in csv_paths:
-        raise ValueError(f"Invalid model size: {model_size}. Must be one of {list(csv_paths.keys())}")
+    args = parser.parse_args()
     
-    csv_path = csv_paths[model_size]
-    model_name = model_size.upper()
+    csv_path = args.csv_path
+    model_name = args.model_name
+    num_classes = args.num_classes
     
     print(f"Plotting {model_name} model with {num_classes} classes")
     print(f"Using CSV file: {csv_path}")
     
     # Create plots directory if it doesn't exist
     import os
-    os.makedirs('plots_single', exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     
     try:
         # Load data for the specified model
@@ -269,11 +261,11 @@ def main():
         
         # Create single model plots
         print(f"\nCreating {model_name} accuracy curves...")
-        plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=False, output_dir="plots_single")
+        plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=False, output_dir=args.output_dir)
         
         # Create smoothed plots
         print(f"Creating smoothed {model_name} accuracy curves...")
-        plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=True, output_dir="plots_single")
+        plot_accuracy_curves_single(results_df, model_name, num_classes, smooth=True, output_dir=args.output_dir)
         
         print(f"\n{model_name} plots generated successfully!")
         

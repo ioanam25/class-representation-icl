@@ -9,11 +9,11 @@ from relabeling import optimize_tokens
 import argparse
 
 def main(MODEL_NAME='llama3.1_base', 
-         DATASET_NAME='claude_multitask',
-         num_classes=3,
+         DATASET_NAME='TREC_coarse',
+         num_classes=5,
          n_relabel_list=None,  # Now takes a list of n_relabel values
          n_runs=1,
-         top_tokens=10000,
+         top_tokens=128256,
          whole_words_only=True,
          ensemble_assignment=True,
          ensemble_method='logit_averaging',
@@ -53,9 +53,9 @@ def main(MODEL_NAME='llama3.1_base',
     # Load precomputed logits
     print("\nLoading precomputed logits...")
     file_suffix = '_whole_words' if whole_words_only else ''
-    with open(f'7B_sentence_info/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+    with open(f'{MODEL_NAME}_{DATASET_NAME}/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
         sentence_probs = pickle.load(f)
-    with open(f'7B_sentence_info/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
+    with open(f'{MODEL_NAME}_{DATASET_NAME}/template_sentence_logits_{top_tokens}{file_suffix}.pkl', 'rb') as f:
         sentence_logits = pickle.load(f)
     
     # Get tokens
@@ -70,9 +70,14 @@ def main(MODEL_NAME='llama3.1_base',
         print(f"\n=== Generating relabeling for {n_relabel} examples ===")
         
         # Randomly select n_relabel examples
-        run_examples = relabeling_df.sample(n=n_relabel, random_state=run_seeds[0])  # Use first seed for consistency
+        # run_examples = relabeling_df.sample(n=n_relabel, random_state=run_seeds[0])
+        # Sample balanced examples from each class
+        samples_per_class = n_relabel // num_classes
+        run_examples = relabeling_df.groupby('label', group_keys=False).apply(
+            lambda x: x.sample(n=min(samples_per_class, len(x)), random_state=run_seeds[0])
+        ).reset_index(drop=True)
         sentences = run_examples['text']
-        labels = run_examples['emotion_letter']
+        labels = run_examples['label']
         
         print(f"Selected {n_relabel} examples")
         print("Label distribution:", labels.value_counts())
@@ -92,7 +97,7 @@ def main(MODEL_NAME='llama3.1_base',
         )
         
         # Save results for this n_relabel
-        save_dir = Path("7B_relabelings")
+        save_dir = Path(f"{MODEL_NAME}_{DATASET_NAME}_relabelings")
         save_dir.mkdir(exist_ok=True)
         
         config = {
@@ -109,7 +114,7 @@ def main(MODEL_NAME='llama3.1_base',
             'base_seed': base_seed
         }
         
-        save_path = save_dir / f"7B_relabelings_{num_classes}classes_{top_tokens}toptokens_isensembled{ensemble_assignment}_{ensemble_method}_{n_relabel}examples_{n_runs}runs.pkl"
+        save_path = save_dir / f"{MODEL_NAME}_{DATASET_NAME}_relabelings_{num_classes}classes_{top_tokens}toptokens_isensembled{ensemble_assignment}_{ensemble_method}_{n_relabel}examples_{n_runs}runs.pkl"
         with open(save_path, 'wb') as f:
             pickle.dump({
                 'config': config,
@@ -137,7 +142,7 @@ def main(MODEL_NAME='llama3.1_base',
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="llama3.1_base", help="Model name")
-    parser.add_argument("--dataset", default="claude_multitask", help="Dataset name")
+    parser.add_argument("--dataset", default="TREC_coarse", help="Dataset name")
     parser.add_argument("--num_classes", type=int, default=5, help="Number of classes")
     parser.add_argument("--n_relabel_list", type=str, default="10,20,30,40,50,60,70,80,90,100", 
                       help="Comma-separated list of n_relabel values")

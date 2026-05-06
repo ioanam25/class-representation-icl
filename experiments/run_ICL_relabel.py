@@ -2,7 +2,7 @@ from LLMGeometry.datasets import load_dataset_by_name
 from LLMGeometry.in_context_learning import ICL_Template, load_ICL_template, list_ICL_templates_in_json
 from LLMGeometry import load_model_and_tokenizer
 from LLMGeometry.evaluation import run_on_dataframe
-from LLMGeometry.utils import generate_random_samples, save_file_with_incremental_suffix
+from LLMGeometry.utils import generate_random_samples, generate_imbalanced_samples, save_file_with_incremental_suffix
 import torch
 import os
 
@@ -44,7 +44,7 @@ def save_outputs(output, save_folder, CONFIG):
         }, f)
 
 
-def create_template(train_df, prefix_type, n_examples, keyword, answer_field, dataset_name, shuffle_labels=False, seed=None):
+def create_template(train_df, prefix_type, n_examples, keyword, answer_field, dataset_name, shuffle_labels=False, seed=None, class_ratios=None, prompt_format=None):
     '''
         Create a template for the ICL prompt.
         
@@ -64,6 +64,14 @@ def create_template(train_df, prefix_type, n_examples, keyword, answer_field, da
             Whether to shuffle the labels.
         seed: int
             The seed for the random number generator.
+        class_ratios: dict or None
+            If provided, sample demonstrations with imbalanced class distribution.
+            e.g. {'A': 0.6, 'C': 0.3, 'D': 0.1}
+        prompt_format: str or None
+            Format variant for the prompt. Options:
+              - None / "default" : "Text: ... \n{keyword}: ..."
+              - "sentence_label"  : "Sentence: ... \nLabel: ..."
+              - "arrow"           : "Input: ... → ..."
         
         Returns:
         -------
@@ -81,23 +89,51 @@ def create_template(train_df, prefix_type, n_examples, keyword, answer_field, da
     elif prefix_type=='instruction':
         prefix = 'This is a text classification task. Possible categories are: ' + ', '.join(category_list) + '.\n'
     elif prefix_type == 'demos':
-        chosen_indices = generate_random_samples(train_df[answer_field], n_examples, seed=seed)
+        if class_ratios is not None and n_examples > 0:
+            chosen_indices = generate_imbalanced_samples(train_df[answer_field], n_examples, class_ratios, seed=seed)
+        else:
+            chosen_indices = generate_random_samples(train_df[answer_field], n_examples, seed=seed)
         chosen_sentences = train_df.loc[chosen_indices,'text']
         chosen_labels = train_df.loc[chosen_indices, answer_field]
         if shuffle_labels:
             chosen_labels = chosen_labels.sample(frac=1).reset_index(drop=True) # Shuffle the labels
         prefix = ''
-        for sentence, label in zip(chosen_sentences, chosen_labels):
-            prefix += 'Text: ' + sentence + f'\n{keyword}: ' + label + '\n'
+        if prompt_format == 'sentence_label':
+            for sentence, label in zip(chosen_sentences, chosen_labels):
+                prefix += 'Sentence: ' + sentence + '\nLabel: ' + str(label) + '\n'
+        elif prompt_format == 'arrow':
+            for sentence, label in zip(chosen_sentences, chosen_labels):
+                prefix += 'Input: ' + sentence + ' → ' + str(label) + '\n'
+        else:  # default
+            for sentence, label in zip(chosen_sentences, chosen_labels):
+                prefix += 'Text: ' + sentence + f'\n{keyword}: ' + str(label) + '\n'
     # --- Creating the suffix
-    suffix = f'\n{keyword}:'
+    if prompt_format == 'sentence_label':
+        suffix = '\nLabel:'
+    elif prompt_format == 'arrow':
+        suffix = ' →'
+    else:
+        suffix = f'\n{keyword}:'
     return prefix, suffix, chosen_sentences, chosen_labels
 
 
 def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relabel, keyword, answer_field, N_RUNS=50, 
          root_folder="DATA/ICL_stability/results", ensemble_assignment=False, ensemble_method='voting', 
-         ensemble_temperature=1.0, top_tokens=-1, whole_words_only=False, base_seed=42):
+         ensemble_temperature=1.0, top_tokens=-1, whole_words_only=False, base_seed=42, fixed_relabeling_path=None,
+         class_ratios=None, prompt_format=None):
     
+    # --- Normalize paths after repo re-organization ---
+    if isinstance(root_folder, str) and "/" not in root_folder and root_folder.startswith("learning_curves_"):
+        root_folder = f"learning_curves/{root_folder}"
+
+    if isinstance(fixed_relabeling_path, str):
+        # If configs reference the pre-reorg layout, rewrite to the new structure.
+        if fixed_relabeling_path.startswith("llama/"):
+            fixed_relabeling_path = fixed_relabeling_path.replace("llama/", "relabelings/llama/", 1)
+        elif fixed_relabeling_path.startswith(("qwen2_7b_base", "mistral_7b_base", "llama3.1_base_TREC_coarse")):
+            if not fixed_relabeling_path.startswith("relabelings/"):
+                fixed_relabeling_path = f"relabelings/{fixed_relabeling_path}"
+
     # Check CUDA availability and initialize
     if torch.cuda.is_available():
         torch.cuda.init()
@@ -165,11 +201,19 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         
         # Determine the correct directory based on model name
         if MODEL_NAME == 'llama3.1_1b_base':
-            info_dir = '1B_sentence_info'
+            info_dir = 'logits/llama/1B_sentence_info'
         elif MODEL_NAME == 'llama3.1_70b_instruct':
-            info_dir = '70B_sentence_info'
-        else:
-            info_dir = '7B_sentence_info'  # Default fallback
+            info_dir = 'logits/llama/70B_sentence_info'
+        elif MODEL_NAME == 'llama3.1_base' and DATASET_NAME == 'claude_multitask':
+            info_dir = 'logits/llama/7B_sentence_info'  # 8B model
+        elif MODEL_NAME == 'llama_7b_base':
+            info_dir = 'logits/llama/7B_sentence_info'  # Default fallback
+        elif MODEL_NAME == 'mistral_7b_base':
+            info_dir = 'logits/mistral_7b_base'
+        elif MODEL_NAME == 'qwen2_7b_base':
+            info_dir = 'logits/qwen2_7b_base'
+        elif MODEL_NAME == 'llama3.1_base' and DATASET_NAME == 'TREC_coarse':
+            info_dir = 'logits/llama3.1_base_TREC_coarse'
             
         with open(f'{info_dir}/template_sentence_probs_{top_tokens}{file_suffix}.pkl', 'rb') as f:
             sentence_probs = pickle.load(f)
@@ -236,20 +280,45 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     n_existing_runs = len(list(folder_with_runs.glob("run_*"))) # Number of existing runs
 
     # Load precomputed relabeling
-    # Determine the correct directory based on model name
-    if MODEL_NAME == 'llama3.1_1b_base':
-        relabeling_dir = '1B_relabelings'
-        relabeling_prefix = '1B'
-    elif MODEL_NAME == 'llama3.1_70b_instruct':
-        relabeling_dir = '70B_relabelings'
-        relabeling_prefix = '70B'
+    # If fixed_relabeling_path is provided, use that; otherwise determine based on model
+    if fixed_relabeling_path:
+        relabeling_path = Path(fixed_relabeling_path)
+        print(f"\n*** Using FIXED relabeling from: {relabeling_path} ***")
     else:
-        relabeling_dir = '7B_relabelings'  # Default fallback
-        relabeling_prefix = '7B'
-        
-    relabeling_path = Path(f"{relabeling_dir}/{relabeling_prefix}_relabelings_{num_classes}classes_128256toptokens_isensembledFalse_voting_{n_relabel}examples_1runs.pkl")
+        # Determine the correct directory based on model name
+        if MODEL_NAME == 'llama3.1_1b_base':
+            relabeling_dir = 'relabelings/llama/1B_relabelings'
+            relabeling_prefix = '1B'
+        elif MODEL_NAME == 'llama3.1_70b_instruct':
+            relabeling_dir = 'relabelings/llama/70B_relabelings'
+            relabeling_prefix = '70B'
+        elif MODEL_NAME == 'llama3.1_base' and DATASET_NAME == 'claude_multitask':
+            relabeling_dir = 'relabelings/llama/7B_relabelings'  # 8B model
+            relabeling_prefix = '7B'
+        elif MODEL_NAME == 'llama_7b_base':
+            relabeling_dir = 'relabelings/llama/7B_relabelings'  # Default fallback
+            relabeling_prefix = '7B'
+        elif MODEL_NAME == 'mistral_7b_base' and DATASET_NAME == 'claude_multitask':
+            relabeling_dir = 'relabelings/mistral_7b_base_relabelings'
+            relabeling_prefix = 'mistral_7b_base'
+        elif MODEL_NAME == 'qwen2_7b_base' and DATASET_NAME == 'claude_multitask':
+            relabeling_dir = 'relabelings/qwen2_7b_base_relabelings'
+            relabeling_prefix = 'qwen2_7b_base'
+        elif MODEL_NAME == 'llama3.1_base' and DATASET_NAME == 'TREC_coarse':
+            relabeling_dir = 'relabelings/llama3.1_base_TREC_coarse_relabelings'
+            relabeling_prefix = 'llama3.1_base_TREC_coarse'
+        elif MODEL_NAME == 'mistral_7b_base' and DATASET_NAME == 'TREC_coarse':
+            relabeling_dir = 'relabelings/mistral_7b_base_TREC_coarse_relabelings'
+            relabeling_prefix = 'mistral_7b_base_TREC_coarse'
+        elif MODEL_NAME == 'qwen2_7b_base' and DATASET_NAME == 'TREC_coarse':
+            relabeling_dir = 'relabelings/qwen2_7b_base_TREC_coarse_relabelings'
+            relabeling_prefix = 'qwen2_7b_base_TREC_coarse'
+        else:
+            raise ValueError(f"No relabeling directory found for model {MODEL_NAME} and dataset {DATASET_NAME}")
+        relabeling_path = Path(f"{relabeling_dir}/{relabeling_prefix}_relabelings_{num_classes}classes_128256toptokens_isensembledFalse_voting_{n_relabel}examples_1runs.pkl")
+        print(f"Relabeling path: {relabeling_path}")
     if not relabeling_path.exists():
-        raise ValueError(f"No relabeling file found for n_relabel={n_relabel}. Please run generate_relabelings.py first.")
+        raise ValueError(f"Relabeling file not found: {relabeling_path}")
     
     print(f"\nLoading relabeling scheme from {relabeling_path}")
     with open(relabeling_path, 'rb') as f:
@@ -257,8 +326,10 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         
     # Verify the relabeling configuration matches
     relabeling_config = relabeling_data['config']
-    if relabeling_config['MODEL_NAME'] != MODEL_NAME:
-        raise ValueError(f"Relabeling model ({relabeling_config['MODEL_NAME']}) doesn't match current model ({MODEL_NAME})")
+    if not fixed_relabeling_path:
+        # Only validate model match if we're not using a fixed relabeling
+        if relabeling_config['MODEL_NAME'] != MODEL_NAME:
+            raise ValueError(f"Relabeling model ({relabeling_config['MODEL_NAME']}) doesn't match current model ({MODEL_NAME})")
     if relabeling_config['DATASET_NAME'] != DATASET_NAME:
         raise ValueError(f"Relabeling dataset ({relabeling_config['DATASET_NAME']}) doesn't match current dataset ({DATASET_NAME})")
     
@@ -266,6 +337,7 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
     new_labels = relabeling_data['relabelings'][0]['labels']
     print("\nUsing relabeling scheme:")
     for orig_label, (new_token, token_id) in new_labels.items():
+        print(type(orig_label))
         print(f"  {orig_label} -> {new_token} (ID: {token_id})")
 
     if num_classes == 3:
@@ -283,12 +355,12 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         print(colored(f"Results will be saved to: {folder_with_runs}", 'cyan'))
 
         # --- Creating the ICL prompt, by selecting random examples from the demonstrations set
-        prefix, suffix, sentences, labels = create_template(demonstrations_df, prefix_type, n_examples, keyword, answer_field, DATASET_NAME, seed=run_seeds[k])
+        prefix, suffix, sentences, labels = create_template(demonstrations_df, prefix_type, n_examples, keyword, answer_field, DATASET_NAME, seed=run_seeds[k], class_ratios=class_ratios, prompt_format=prompt_format)
         print("\nSelected demonstration examples:")
         for s, l in zip(sentences, labels):
             print(f"Text: {s[:50]}... | Label: {l}")
 
-        prefix, suffix, prefix_tokens = template_new_labels(tokenizer, sentences, labels, new_labels, keyword)
+        prefix, suffix, prefix_tokens = template_new_labels(tokenizer, sentences, labels, new_labels, keyword, prompt_format=prompt_format)
         # prefix_gold, suffix_gold, prefix_tokens_gold = template_new_labels(tokenizer, sentences, labels, gold_labels, keyword)
 
         suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
@@ -296,12 +368,35 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
         print('Suffix tokens:', [tokenizer.decode([t]) for t in suffix_tokens])
         suffix_crop = len(suffix_tokens) - 1 # Number of tokens in the suffix to crop (-1 because \n will get fused with "." token at the end of the sentence)
 
-        test_df['text_with_suffix'] = 'Text: ' + test_df['text'] + suffix
+        if prompt_format == 'sentence_label':
+            test_df['text_with_suffix'] = 'Sentence: ' + test_df['text'] + suffix
+        elif prompt_format == 'arrow':
+            test_df['text_with_suffix'] = 'Input: ' + test_df['text'] + suffix
+        else:
+            test_df['text_with_suffix'] = 'Text: ' + test_df['text'] + suffix
         # test_df['text_with_suffix_gold'] = 'Text: ' + test_df['text'] + suffix_gold
-        test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][0])
-        test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][1])
-        test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[x[1:]][0])
-        test_df['gold_label_id'] = test_df[answer_field].apply(lambda x: gold_labels[x[1:]][1])
+        # print("NEW LABELS: ", new_labels)
+        # print("test df[answer_field]: ", test_df[answer_field])
+        if (MODEL_NAME.startswith('llama') or MODEL_NAME == 'qwen2_7b_base') and DATASET_NAME != 'TREC_coarse':
+            test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][0])
+            test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[x[1:]][1])
+            test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[x[1:]][0])
+            test_df['gold_label_id'] = test_df[answer_field].apply(lambda x: gold_labels[x[1:]][1])
+        elif MODEL_NAME == 'mistral_7b_base' and DATASET_NAME == 'claude_multitask':
+            test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[x][0])
+            test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[x][1])
+            test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[x][0])
+            test_df['gold_label_id'] = test_df[answer_field].apply(lambda x: gold_labels[x][1])
+        elif (MODEL_NAME == 'llama3.1_base' or MODEL_NAME == 'qwen2_7b_base') and DATASET_NAME == 'TREC_coarse':
+            test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[int(x[1:])][0])
+            test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[int(x[1:])][1])
+            # test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[int(x[1:])][0])
+            # test_df['gold_label_id'] = test_df[answer_field].apply(lambda x: gold_labels[int(x[1:])][1])
+        elif MODEL_NAME == 'mistral_7b_base' and DATASET_NAME == 'TREC_coarse':
+            test_df['token_relabel_str'] = test_df[answer_field].apply(lambda x: new_labels[int(x)][0])
+            test_df['token_relabel_id'] = test_df[answer_field].apply(lambda x: new_labels[int(x)][1])
+            # test_df['gold_label_str'] = test_df[answer_field].apply(lambda x: gold_labels[x][0])
+            # test_df['gold_label_id'] = test_df[answer_field].apply(lambda x: gold_labels[x][1])
         # print("test_df['token_relabel_str']: ", test_df['token_relabel_str'])
         # print("test_df['token_relabel_id']: ", test_df['token_relabel_id'])
 
@@ -350,7 +445,10 @@ def main(MODEL_NAME, DATASET_NAME, num_classes, prefix_type, n_examples, n_relab
             'ensemble_method': ensemble_method,
             'ensemble_temperature': ensemble_temperature,
             'whole_words_only': whole_words_only,
-            'relabeling_path': str(relabeling_path)  # Also add the relabeling path for reference
+            'relabeling_path': str(relabeling_path),  # Also add the relabeling path for reference
+            'fixed_relabeling_path': str(fixed_relabeling_path) if fixed_relabeling_path else None,  # Track if using fixed relabeling
+            'relabeling_source_model': relabeling_config['MODEL_NAME'],  # Track which model generated the relabeling
+            'class_ratios': class_ratios  # Track imbalanced class ratios (None if balanced)
         }
 
         total_run_id = n_existing_runs + k # Total number of runs
@@ -443,14 +541,14 @@ if __name__ == "__main__":
         
     else:
         # Command line mode
-        parser.add_argument("--model", default="llama3.1_70b_instruct", help="Model name")
-        parser.add_argument("--dataset", default="claude_multitask", help="Dataset name")
+        parser.add_argument("--model", default="mistral_7b_base", help="Model name")
+        parser.add_argument("--dataset", default="TREC_coarse", help="Dataset name")
         parser.add_argument("--num_classes", type=int, default=5, help="Number of classes")
         parser.add_argument("--prefix_type", default="demos", help="Prefix type")
         parser.add_argument("--n_examples", type=int, required=True, help="Number of examples in context")
         parser.add_argument("--n_relabel", type=int, required=True, help="Number of examples used for relabeling")
         parser.add_argument("--keyword", default="Category", help="Keyword")
-        parser.add_argument("--answer_field", default="emotion_letter", help="Answer field")
+        parser.add_argument("--answer_field", default="label", help="Answer field")
         parser.add_argument("--n_runs", type=int, default=10, help="Number of runs")
         parser.add_argument("--root_folder", default="test_relabelings", help="Root folder for results")
         parser.add_argument("--ensemble_assignment", type=bool, default=False, help="Whether to use ensemble assignment")

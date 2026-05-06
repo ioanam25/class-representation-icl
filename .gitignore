@@ -53,3 +53,7 @@ src/LLMGeometry/gcmc.py
 src/LLMGeometry/prompt_tuning.py
 src/LLMGeometry/results_aggregation.py
 run_all_relabelings.sh
+learning_curves/
+logs/
+logits/
+relabelings/

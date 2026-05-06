@@ -4,7 +4,12 @@ import numpy as np
 from pathlib import Path
 import h5py
 import pickle
-from transformers.cache_utils import HybridCache, DynamicCache
+try:
+    from transformers.cache_utils import HybridCache, DynamicCache
+except ImportError:
+    # HybridCache might not be available in older transformers versions
+    from transformers.cache_utils import DynamicCache
+    HybridCache = None
 
 
 def create_attention_mask_from_sequence_lengths(seq_lengths):
@@ -84,7 +89,7 @@ def expand_KV(past_key_values, batch_size):
     if past_key_values is None:  # Handle None (empty prefix) case
         return None
     
-    if isinstance(past_key_values, HybridCache): 
+    if HybridCache is not None and isinstance(past_key_values, HybridCache): 
         # HybridCache handles batch expansion internally
         return past_key_values
     
@@ -250,6 +255,60 @@ def generate_random_samples(labels, N, seed=None):
         
     acc_indices = np.array(acc_indices)
     rng.shuffle(acc_indices) # Shuffle the indices to make sure they are not ordered by category
+    return acc_indices
+
+
+def generate_imbalanced_samples(labels, N, class_ratios, seed=None):
+    '''
+        Randomly select N samples with imbalanced class distribution according to specified ratios.
+        
+        Parameters:
+        ----------
+        labels: array-like of label values
+        N: int, total number of samples to select
+        class_ratios: dict mapping label_value -> proportion (should sum to ~1.0)
+            e.g. {'A': 0.6, 'C': 0.3, 'D': 0.1} for 3-class imbalanced
+        seed: optional random seed
+        
+        Returns:
+        -------
+        numpy array of indices into the labels array
+    '''
+    unique_labels = np.unique(labels)
+    idx_by_label = {cat: np.arange(len(labels))[labels == cat] for cat in unique_labels}
+    
+    rng = np.random.default_rng(seed)
+    
+    # Calculate samples per class based on ratios
+    # Sort by ratio descending so the last (smallest) class absorbs rounding remainder
+    sorted_labels = sorted(class_ratios.keys(), key=lambda x: -class_ratios[x])
+    n_per_class = {}
+    total_assigned = 0
+    
+    for i, lab in enumerate(sorted_labels):
+        if i == len(sorted_labels) - 1:
+            # Last class gets the remainder to ensure exact total
+            n_per_class[lab] = N - total_assigned
+        else:
+            n_per_class[lab] = round(N * class_ratios[lab])
+            total_assigned += n_per_class[lab]
+    
+    acc_indices = []
+    for lab in unique_labels:
+        lab_str = str(lab)
+        # Match label to ratio key (handles both string and non-string labels)
+        if lab in n_per_class:
+            key = lab
+        elif lab_str in n_per_class:
+            key = lab_str
+        else:
+            continue
+        n_samples = min(n_per_class[key], len(idx_by_label[lab]))
+        if n_samples > 0:
+            acc_indices.extend(rng.choice(idx_by_label[lab], n_samples, replace=False))
+    
+    acc_indices = np.array(acc_indices)
+    rng.shuffle(acc_indices)
     return acc_indices
     
     

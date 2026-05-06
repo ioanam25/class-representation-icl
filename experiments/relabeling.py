@@ -3,7 +3,9 @@ import random
 import numpy as np
 from termcolor import colored
 
-def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer, max_iterations=100, num_restarts=10, lambda_reg=0, ensemble_assignment=False, ensemble_method='voting', ensemble_temperature=1.0, whole_words_only=False):
+MODEL_NAME = 'llama3.1_base'
+
+def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer, max_iterations=100, num_restarts=10, lambda_reg=0, ensemble_assignment=False, ensemble_method='voting', ensemble_temperature=1.0, whole_words_only=False, initial_labels=None):
     '''
     Optimize token assignments for each class using hill climbing with multiple restarts.
     This function is used to find optimal token mappings for each class label.
@@ -16,7 +18,10 @@ def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer,
     
     # Filter for whole word tokens if requested
     if whole_words_only:
-        top_k_tokens = [token for token in top_k_tokens if token.startswith('Ġ')]
+        if MODEL_NAME == 'mistral_7b_base':
+            top_k_tokens = [token for token in top_k_tokens if token.startswith('▁')]
+        else:
+            top_k_tokens = [token for token in top_k_tokens if token.startswith('Ġ')]
         print(f"Using {len(top_k_tokens)} whole word tokens for optimization")
         
         if len(top_k_tokens) < len(classes):
@@ -140,11 +145,31 @@ def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer,
     best_restart = -1
     all_solutions = []  # Store all solutions for ensemble
     
-    for restart in range(num_restarts):
-        print(f"\n--- Restart {restart + 1}/{num_restarts} ---")
+    # If initial_labels provided, run a single deterministic restart from gold,
+    # then run remaining restarts from random for comparison.
+    if initial_labels is not None:
+        effective_restarts = 1  # Gold init is deterministic, only need 1
+        print(f"\n*** Gold-label initialization (1 deterministic run) ***")
+    else:
+        effective_restarts = num_restarts
+    
+    for restart in range(effective_restarts):
+        print(f"\n--- Restart {restart + 1}/{effective_restarts} ---")
         
-        # Initialize with random assignment for this restart
-        initial_assignments = {c: random.choice(top_k_tokens) for c in classes}
+        if initial_labels is not None:
+            initial_assignments = {}
+            for c in classes:
+                if c in initial_labels:
+                    gold_token = initial_labels[c]
+                    if gold_token in top_k_tokens:
+                        initial_assignments[c] = gold_token
+                        print(f"  Class {c}: initialized with '{gold_token}'")
+                    else:
+                        raise ValueError(f"Gold token '{gold_token}' not in vocabulary for class {c}")
+                else:
+                    raise ValueError(f"No gold label provided for class {c}")
+        else:
+            initial_assignments = {c: random.choice(top_k_tokens) for c in classes}
         initial_objective = calculate_objective(initial_assignments)
         print(f"Initial objective: {initial_objective}")
         
@@ -298,7 +323,7 @@ def optimize_tokens(top_k_tokens, sentences, labels, sentence_logits, tokenizer,
 
     return new_labels, final_objective
 
-def template_new_labels(tokenizer, sentences, labels, new_labels, keyword):
+def template_new_labels(tokenizer, sentences, labels, new_labels, keyword, prompt_format=None):
     """
     Create template with new labels for the given sentences.
     
@@ -314,6 +339,11 @@ def template_new_labels(tokenizer, sentences, labels, new_labels, keyword):
         Dictionary mapping original labels to (token_str, token_id) tuples
     keyword : str
         Keyword to use in the template
+    prompt_format : str or None
+        Format variant for the prompt. Options:
+          - None / "default" : "Text: ... \n{keyword}: ..."
+          - "sentence_label"  : "Sentence: ... \nLabel: ..."
+          - "arrow"           : "Input: ... → ..."
         
     Returns:
     --------
@@ -326,10 +356,38 @@ def template_new_labels(tokenizer, sentences, labels, new_labels, keyword):
     """
     prefix = ''
     prefix_tokens = []
-    for sentence, label in zip(sentences, labels):
-        prefix += 'Text: ' + sentence + f'\n{keyword}: ' + new_labels[label][0] + '\n'
-        prefix_tokens.extend(tokenizer.encode('Text: ' + sentence + f'\n{keyword}: ', add_special_tokens=False))
-        prefix_tokens.append(new_labels[label][1])  # This is the token ID
-        prefix_tokens.extend(tokenizer.encode('\n', add_special_tokens=False))
-    suffix = f'\n{keyword}: '
+
+    if prompt_format == 'sentence_label':
+        for sentence, label in zip(sentences, labels):
+            prefix += 'Sentence: ' + sentence + '\nLabel: ' + new_labels[label][0] + '\n'
+            prefix_tokens.extend(tokenizer.encode('Sentence: ' + sentence + '\nLabel: ', add_special_tokens=False))
+            prefix_tokens.append(new_labels[label][1])
+            prefix_tokens.extend(tokenizer.encode('\n', add_special_tokens=False))
+        if MODEL_NAME == 'mistral_7b_base':
+            suffix = '\nLabel:'
+        else:
+            suffix = '\nLabel: '
+
+    elif prompt_format == 'arrow':
+        for sentence, label in zip(sentences, labels):
+            prefix += 'Input: ' + sentence + ' → ' + new_labels[label][0] + '\n'
+            prefix_tokens.extend(tokenizer.encode('Input: ' + sentence + ' → ', add_special_tokens=False))
+            prefix_tokens.append(new_labels[label][1])
+            prefix_tokens.extend(tokenizer.encode('\n', add_special_tokens=False))
+        if MODEL_NAME == 'mistral_7b_base':
+            suffix = ' →'
+        else:
+            suffix = ' → '
+
+    else:  # default
+        for sentence, label in zip(sentences, labels):
+            prefix += 'Text: ' + sentence + f'\n{keyword}: ' + new_labels[label][0] + '\n'
+            prefix_tokens.extend(tokenizer.encode('Text: ' + sentence + f'\n{keyword}: ', add_special_tokens=False))
+            prefix_tokens.append(new_labels[label][1])
+            prefix_tokens.extend(tokenizer.encode('\n', add_special_tokens=False))
+        if MODEL_NAME == 'mistral_7b_base':
+            suffix = f'\n{keyword}:'
+        else:
+            suffix = f'\n{keyword}: '
+
     return prefix, suffix, prefix_tokens 

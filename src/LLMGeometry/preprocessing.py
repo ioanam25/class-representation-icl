@@ -5,6 +5,7 @@ import LLMGeometry.models.llama3_1b_base.preprocessing
 import LLMGeometry.models.llama3_70b_instruct.preprocessing
 import LLMGeometry.models.gemma2_2b_base.preprocessing
 import LLMGeometry.models.mistral_7b_base.preprocessing
+import LLMGeometry.models.qwen2_7b_base.preprocessing
 
 class DataFrameDataset(Dataset):
     def __init__(self, df):
@@ -36,5 +37,8 @@ def prepare_batch(batch, model, tokenizer, soft_prompt_embeds=None, soft_prompt_
     
     if model.name_or_path == 'mistralai/Mistral-7B-v0.3':
         return LLMGeometry.models.mistral_7b_base.preprocessing.prepare_batch(batch, model, tokenizer, soft_prompt_embeds=soft_prompt_embeds, soft_prompt_location=soft_prompt_location, prompt_text_field=prompt_text_field, answer_field=answer_field, verbose=verbose, add_special_tokens=add_special_tokens)
+    
+    if model.name_or_path == 'Qwen/Qwen2.5-7B':
+        return LLMGeometry.models.qwen2_7b_base.preprocessing.prepare_batch(batch, model, tokenizer, soft_prompt_embeds=soft_prompt_embeds, soft_prompt_location=soft_prompt_location, prompt_text_field=prompt_text_field, answer_field=answer_field, verbose=verbose, add_special_tokens=add_special_tokens)
     
     raise ValueError(f"Model {model.name_or_path} not supported.")
